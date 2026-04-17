@@ -162,7 +162,7 @@ if dbPath == "" {
 }
 
 // Open bd storage
-store, err := beads.NewSQLiteStorage(dbPath)
+store, err := beads.Open(ctx, dbPath)
 
 // Find ready work
 readyIssues, err := store.GetReadyWork(ctx, beads.WorkFilter{Limit: 10})
@@ -238,4 +238,4 @@ See [EXTENDING.md](../../EXTENDING.md) for more patterns and the VC implementati
 
 - [EXTENDING.md](../../EXTENDING.md) - Complete extension guide
 - [../../README.md](../../README.md) - bd documentation
-- Run `bd quickstart` for an interactive tutorial
+- [QUICKSTART.md](../../docs/QUICKSTART.md) - Quick start tutorial

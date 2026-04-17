@@ -10,6 +10,7 @@
 - [Dependencies & Labels](#dependencies--labels)
 - [Filtering & Search](#filtering--search)
 - [Advanced Operations](#advanced-operations)
+- [Molecular Chemistry](#molecular-chemistry)
 - [Database Management](#database-management)
 - [Editor Integration](#editor-integration)
 
@@ -18,14 +19,13 @@
 ### Check Status
 
 ```bash
-# Check database path and daemon status
+# Check database path and server status
 bd info --json
 
 # Example output:
 # {
 #   "database_path": "/path/to/.beads/beads.db",
 #   "issue_prefix": "bd",
-#   "daemon_running": true,
 #   "agent_mail_enabled": false
 # }
 ```
@@ -33,12 +33,15 @@ bd info --json
 ### Find Work
 
 ```bash
-# Find ready work (no blockers)
+# Find ready work (no blockers, not already claimed)
 bd ready --json
+
+# Atomically claim an issue from the ready queue
+bd update <id> --claim --json               # Fails if already claimed
 
 # Find stale issues (not updated recently)
 bd stale --days 30 --json                    # Default: 30 days
-bd stale --days 90 --status in_progress --json  # Filter by status
+bd stale --days 90 --status in_progress --json  # Find abandoned claims
 bd stale --limit 20 --json                   # Limit results
 ```
 
@@ -61,6 +64,7 @@ bd create "Issue title" -t bug -p 1 --label bug,critical --json
 # Examples with special characters (all require quoting):
 bd create "Fix: auth doesn't validate tokens" -t bug -p 1 --json
 bd create "Add support for OAuth 2.0" -d "Implement RFC 6749 (OAuth 2.0 spec)" --json
+bd create "Implement auth" --spec-id "docs/specs/auth.md" --json
 
 # Create multiple issues from markdown file
 bd create -f feature-plan.md --json
@@ -70,25 +74,42 @@ bd create "Issue title" --body-file=description.md --json
 bd create "Issue title" --body-file description.md -p 1 --json
 
 # Read description from stdin
+echo "Description text" | bd create "Issue title" --stdin --json
+cat description.md | bd create "Issue title" --stdin -p 1 --json
+# --body-file=- also works:
 echo "Description text" | bd create "Issue title" --body-file=- --json
-cat description.md | bd create "Issue title" --body-file - -p 1 --json
 
 # Create epic with hierarchical child tasks
-bd create "Auth System" -t epic -p 1 --json         # Returns: bd-a3f8e9
-bd create "Login UI" -p 1 --json                     # Auto-assigned: bd-a3f8e9.1
-bd create "Backend validation" -p 1 --json           # Auto-assigned: bd-a3f8e9.2
-bd create "Tests" -p 1 --json                        # Auto-assigned: bd-a3f8e9.3
+bd create "Auth System" -t epic -p 1 --json                     # Returns: bd-a3f8e9
+bd create "Login UI" -p 1 --parent bd-a3f8e9 --json             # Auto-assigned: bd-a3f8e9.1
+bd create "Backend validation" -p 1 --parent bd-a3f8e9 --json   # Auto-assigned: bd-a3f8e9.2
+bd create "Tests" -p 1 --parent bd-a3f8e9 --json                # Auto-assigned: bd-a3f8e9.3
 
 # Create and link discovered work (one command)
 bd create "Found bug" -t bug -p 1 --deps discovered-from:<parent-id> --json
+
+# Create with external reference (v0.9.2+)
+bd create "Fix login" -t bug -p 1 --external-ref "gh-123" --json  # Short form
+bd create "Fix login" -t bug -p 1 --external-ref "https://github.com/org/repo/issues/123" --json  # Full URL
+bd create "Jira task" -t task -p 1 --external-ref "jira-PROJ-456" --json  # Custom prefix
 ```
 
 ### Update Issues
 
 ```bash
 # Update one or more issues
-bd update <id> [<id>...] --status in_progress --json
+bd update <id> [<id>...] --claim --json
 bd update <id> [<id>...] --priority 1 --json
+bd update <id> [<id>...] --spec-id "docs/specs/auth.md" --json
+
+# Update external reference (v0.9.2+)
+bd update <id> --external-ref "gh-456" --json           # Short form
+bd update <id> --external-ref "jira-PROJ-789" --json    # Custom prefix
+
+# Atomically claim an issue for work (prevents race conditions)
+# Sets assignee to you and status to in_progress in one atomic operation
+# Fails if already claimed (assignee is not empty)
+bd update <id> --claim --json
 
 # Edit issue fields in $EDITOR (HUMANS ONLY - not for agents)
 # NOTE: This command is intentionally NOT exposed via the MCP server
@@ -118,6 +139,9 @@ bd dep tree <id>
 
 # Get issue details (supports multiple IDs)
 bd show <id> [<id>...] --json
+
+# Show the currently active issue (in-progress, hooked, or last touched)
+bd show --current
 ```
 
 ## Dependencies & Labels
@@ -142,6 +166,38 @@ bd label list <id> --json
 bd label list-all --json
 ```
 
+### State (Labels as Cache)
+
+For operational state tracking on role beads. Uses `<dimension>:<value>` label convention.
+See [LABELS.md](LABELS.md#operational-state-pattern-labels-as-cache) for full pattern documentation.
+
+```bash
+# Query current state value
+bd state <id> <dimension>                    # Output: value
+bd state agent-abc patrol                  # Output: active
+bd state --json agent-abc patrol           # {"issue_id": "...", "dimension": "patrol", "value": "active"}
+
+# List all state dimensions on an issue
+bd state list <id> --json
+bd state list agent-abc                    # patrol: active, mode: normal, health: healthy
+
+# Set state (creates event + updates label atomically)
+bd set-state <id> <dimension>=<value> --reason "explanation" --json
+bd set-state agent-abc patrol=muted --reason "Investigating stuck worker"
+bd set-state agent-abc mode=degraded --reason "High error rate"
+```
+
+**Common dimensions:**
+- `patrol`: active, muted, suspended
+- `mode`: normal, degraded, maintenance
+- `health`: healthy, warning, failing
+- `status`: idle, working, blocked
+
+**What `set-state` does:**
+1. Creates event bead with reason (source of truth)
+2. Removes old `<dimension>:*` label if exists
+3. Adds new `<dimension>:<value>` label (cache)
+
 ## Filtering & Search
 
 ### Basic Filters
@@ -152,6 +208,7 @@ bd list --status open --priority 1 --json               # Status and priority
 bd list --assignee alice --json                         # By assignee
 bd list --type bug --json                               # By issue type
 bd list --id bd-123,bd-456 --json                       # Specific IDs
+bd list --spec "docs/specs/" --json                     # Spec prefix
 ```
 
 ### Label Filters
@@ -174,6 +231,9 @@ bd list --title "auth" --json
 bd list --title-contains "auth" --json                  # Search in title
 bd list --desc-contains "implement" --json              # Search in description
 bd list --notes-contains "TODO" --json                  # Search in notes
+
+# Find beads issue by external reference
+bd list --json | jq -r '.[] | select(.external_ref == "gh-123") | .id'
 ```
 
 ### Date Range Filters
@@ -227,43 +287,13 @@ When detected, you'll see: `ℹ️  Sandbox detected, using direct mode`
 ```bash
 # Explicitly enable sandbox mode
 bd --sandbox <command>
-
-# Equivalent to combining these flags:
-bd --no-daemon --no-auto-flush --no-auto-import <command>
 ```
 
 **What it does:**
-- Disables daemon (uses direct SQLite mode)
-- Disables auto-export to JSONL
-- Disables auto-import from JSONL
+- Uses embedded database mode (no server needed)
+- Disables auto-sync operations
 
-**When to use:** Sandboxed environments where daemon can't be controlled (permission restrictions), or when auto-detection doesn't trigger.
-
-### Staleness Control
-
-```bash
-# Skip staleness check (emergency escape hatch)
-bd --allow-stale <command>
-
-# Example: access database even if out of sync with JSONL
-bd --allow-stale ready --json
-bd --allow-stale list --status open --json
-```
-
-**Shows:** `⚠️  Staleness check skipped (--allow-stale), data may be out of sync`
-
-**⚠️ Caution:** May show stale or incomplete data. Use only when stuck and other options fail.
-
-### Force Import
-
-```bash
-# Force metadata update even when DB appears synced
-bd import --force -i .beads/issues.jsonl
-```
-
-**When to use:** `bd import` reports "0 created, 0 updated" but staleness errors persist.
-
-**Shows:** `Metadata updated (database already in sync with JSONL)`
+**When to use:** Sandboxed environments where the Dolt server can't be controlled (permission restrictions), or when auto-detection doesn't trigger.
 
 ### Other Global Flags
 
@@ -271,12 +301,9 @@ bd import --force -i .beads/issues.jsonl
 # JSON output for programmatic use
 bd --json <command>
 
-# Force direct mode (bypass daemon)
-bd --no-daemon <command>
-
 # Disable auto-sync
-bd --no-auto-flush <command>    # Disable auto-export to JSONL
-bd --no-auto-import <command>   # Disable auto-import from JSONL
+bd --no-auto-flush <command>    # Disable auto-flush
+bd --no-auto-import <command>   # Disable auto-import
 
 # Custom database path
 bd --db /path/to/.beads/beads.db <command>
@@ -287,7 +314,6 @@ bd --actor alice <command>
 
 **See also:**
 - [TROUBLESHOOTING.md - Sandboxed environments](TROUBLESHOOTING.md#sandboxed-environments-codex-claude-code-etc) for detailed sandbox troubleshooting
-- [DAEMON.md](DAEMON.md) for daemon mode details
 
 ## Advanced Operations
 
@@ -295,11 +321,29 @@ bd --actor alice <command>
 
 ```bash
 # Clean up closed issues (bulk deletion)
-bd cleanup --force --json                                   # Delete ALL closed issues
-bd cleanup --older-than 30 --force --json                   # Delete closed >30 days ago
-bd cleanup --dry-run --json                                 # Preview what would be deleted
-bd cleanup --older-than 90 --cascade --force --json         # Delete old + dependents
+bd admin cleanup --force --json                                   # Delete ALL closed issues
+bd admin cleanup --older-than 30 --force --json                   # Delete closed >30 days ago
+bd admin cleanup --dry-run --json                                 # Preview what would be deleted
+bd admin cleanup --older-than 90 --cascade --force --json         # Delete old + dependents
 ```
+
+### Orphan Detection
+
+Find issues referenced in git commits that were never closed:
+
+```bash
+# Basic usage - scan current repo
+bd orphans
+
+# Cross-repo: scan CODE repo's commits against external BEADS database
+cd ~/my-code-repo
+bd orphans --db ~/my-beads-repo/.beads/beads.db
+
+# JSON output
+bd orphans --json
+```
+
+**Use case**: When your beads database lives in a separate repository from your code, run `bd orphans` from the code repo and point `--db` to the external database. This scans commits in your current directory while checking issue status from the specified database.
 
 ### Duplicate Detection & Merging
 
@@ -318,15 +362,15 @@ bd merge bd-42 bd-43 --into bd-41 --dry-run            # Preview merge
 
 ```bash
 # Agent-driven compaction
-bd compact --analyze --json                           # Get candidates for review
-bd compact --analyze --tier 1 --limit 10 --json       # Limited batch
-bd compact --apply --id bd-42 --summary summary.txt   # Apply compaction
-bd compact --apply --id bd-42 --summary - < summary.txt  # From stdin
-bd compact --stats --json                             # Show statistics
+bd admin compact --analyze --json                           # Get candidates for review
+bd admin compact --analyze --tier 1 --limit 10 --json       # Limited batch
+bd admin compact --apply --id bd-42 --summary summary.txt   # Apply compaction
+bd admin compact --apply --id bd-42 --summary - < summary.txt  # From stdin
+bd admin compact --stats --json                             # Show statistics
 
 # Legacy AI-powered compaction (requires ANTHROPIC_API_KEY)
-bd compact --auto --dry-run --all                     # Preview
-bd compact --auto --all --tier 1                      # Auto-compact tier 1
+bd admin compact --auto --dry-run --all                     # Preview
+bd admin compact --auto --all --tier 1                      # Auto-compact tier 1
 
 # Restore compacted issue from git history
 bd restore <id>  # View full history at time of compaction
@@ -340,39 +384,210 @@ bd rename-prefix kw- --dry-run  # Preview changes
 bd rename-prefix kw- --json     # Apply rename
 ```
 
-## Database Management
+### Reset
 
-### Import/Export
+Remove all local beads data and return to uninitialized state.
 
 ```bash
-# Import issues from JSONL
-bd import -i .beads/issues.jsonl --dry-run      # Preview changes
-bd import -i .beads/issues.jsonl                # Import and update issues
-bd import -i .beads/issues.jsonl --dedupe-after # Import + detect duplicates
+# Preview what would be removed (dry-run)
+bd admin reset
 
-# Handle missing parents during import
-bd import -i issues.jsonl --orphan-handling allow      # Default: import orphans without validation
-bd import -i issues.jsonl --orphan-handling resurrect  # Auto-resurrect deleted parents as tombstones
-bd import -i issues.jsonl --orphan-handling skip       # Skip orphans with warning
-bd import -i issues.jsonl --orphan-handling strict     # Fail if parent is missing
-
-# Configure default orphan handling behavior
-bd config set import.orphan_handling "resurrect"
-bd sync  # Now uses resurrect mode by default
+# Actually perform the reset
+bd admin reset --force
 ```
 
-**Orphan handling modes:**
+**What gets removed:**
+- `.beads/` directory (database, config)
+- Git hooks installed by bd
+- Merge driver configuration
+- Sync branch worktrees (`.git/beads-worktrees/`)
+
+**What does NOT get removed:**
+- Remote sync branch (if configured)
+- Remote Dolt repository data
+- Historical git commits
+
+**Important:** If you want a complete clean slate (including remote data), see [Troubleshooting: Old data returns after reset](TROUBLESHOOTING.md#old-data-returns-after-reset).
+
+**Note:** The `--hard` and `--skip-init` flags mentioned in some discussions were never implemented. Use `--force` to perform the reset.
+
+## Molecular Chemistry
+
+Beads uses a chemistry metaphor for template-based workflows. See [MOLECULES.md](MOLECULES.md) for full documentation.
+
+### Phase Transitions
+
+| Phase | State | Storage | Command |
+|-------|-------|---------|---------|
+| Solid | Proto | `.beads/` | `bd formula list` |
+| Liquid | Mol | `.beads/` | `bd mol pour` |
+| Vapor | Wisp | `.beads/` (Ephemeral=true, not exported) | `bd mol wisp` |
+
+### Proto/Template Commands
+
+```bash
+# List available formulas (templates)
+bd formula list --json
+
+# Show proto structure and variables
+bd mol show <proto-id> --json
+
+# Extract proto from ad-hoc epic
+bd mol distill <epic-id> --json
+```
+
+### Pour (Proto to Mol)
+
+```bash
+# Instantiate proto as persistent mol (solid → liquid)
+bd mol pour <proto-id> --var key=value --json
+
+# Preview what would be created
+bd mol pour <proto-id> --var key=value --dry-run
+
+# Assign root issue
+bd mol pour <proto-id> --var key=value --assignee alice --json
+
+# Attach additional protos during pour
+bd mol pour <proto-id> --attach <other-proto> --json
+```
+
+### Wisp Commands
+
+```bash
+# Instantiate proto as ephemeral wisp (solid → vapor)
+bd mol wisp <proto-id> --var key=value --json
+
+# List all wisps
+bd mol wisp list --json
+bd mol wisp list --all --json    # Include closed
+
+# Garbage collect orphaned wisps
+bd mol wisp gc --json
+bd mol wisp gc --age 24h --json  # Custom age threshold
+bd mol wisp gc --dry-run         # Preview what would be cleaned
+
+# Purge all closed wisps (bulk cleanup)
+bd mol wisp gc --closed              # Preview closed wisp deletion
+bd mol wisp gc --closed --force      # Delete all closed wisps
+bd mol wisp gc --closed --dry-run    # Detailed dry-run preview
+```
+
+### Bonding (Combining Work)
+
+```bash
+# Polymorphic combine - handles proto+proto, proto+mol, mol+mol
+bd mol bond <A> <B> --json
+
+# Bond types
+bd mol bond <A> <B> --type sequential --json   # B runs after A (default)
+bd mol bond <A> <B> --type parallel --json     # B runs alongside A
+bd mol bond <A> <B> --type conditional --json  # B runs only if A fails
+
+# Phase control
+bd mol bond <proto> <mol> --pour --json   # Force persistent spawn
+bd mol bond <proto> <mol> --wisp --json   # Force ephemeral spawn
+
+# Dynamic bonding (custom child IDs)
+bd mol bond <proto> <mol> --ref arm-{{name}} --var name=ace --json
+
+# Preview bonding
+bd mol bond <A> <B> --dry-run
+```
+
+### Squash (Wisp to Digest)
+
+```bash
+# Compress wisp to permanent digest
+bd mol squash <ephemeral-id> --json
+
+# With agent-provided summary
+bd mol squash <ephemeral-id> --summary "Work completed" --json
+
+# Preview
+bd mol squash <ephemeral-id> --dry-run
+
+# Keep wisp children after squash
+bd mol squash <ephemeral-id> --keep-children --json
+```
+
+### Burn (Discard Wisp)
+
+```bash
+# Delete wisp without digest (destructive)
+bd mol burn <ephemeral-id> --json
+
+# Preview
+bd mol burn <ephemeral-id> --dry-run
+
+# Skip confirmation
+bd mol burn <ephemeral-id> --force --json
+```
+
+**Note:** Mol commands use the standard Dolt database access path.
+
+## Gates
+
+Gates are async wait conditions that block dependent work until external conditions are met.
+See [DEPENDENCIES.md](DEPENDENCIES.md) for full documentation.
+
+```bash
+# List open gates
+bd gate list
+bd gate list --all                       # Including closed
+
+# Show gate details
+bd gate show <gate-id>
+
+# Evaluate gates and close resolved ones
+bd gate check                            # All gates
+bd gate check --type=gh:pr               # Only PR merge gates
+bd gate check --type=gh:run              # Only CI run gates
+bd gate check --type=timer               # Only timer gates
+bd gate check --type=bead               # Only cross-rig bead gates
+bd gate check --dry-run                  # Preview without changes
+bd gate check --escalate                 # Escalate failed gates
+
+# Manually resolve a gate
+bd gate resolve <gate-id> --reason "Approved"
+
+# Auto-discover CI run IDs for gh:run gates
+bd gate discover
+bd gate discover --dry-run --branch main
+
+# Add a waiter to a gate
+bd gate add-waiter <gate-id> <waiter>
+```
+
+## Database Management
+
+### Export / Backup / Bootstrap
+
+```bash
+# Export issues to issue JSONL
+bd export -o issues.jsonl
+
+# Dolt-native backup (preserves full commit history)
+bd backup init /path/to/backup    # Register a backup destination
+bd backup sync                   # Push to backup destination
+bd backup restore [path]         # Restore from a backup
+bd backup remove                 # Remove backup destination
+bd backup status                 # Show backup status
+
+# Bootstrap a new database from an issue export
+bd init --from-jsonl                            # Reads .beads/issues.jsonl
+
+# Configure orphan handling for pulls and bootstrapping
+bd config set import.orphan_handling "resurrect"
+bd dolt pull  # Respects import.orphan_handling setting
+```
+
+**Orphan handling modes** (apply to `bd dolt pull` and `bd init --from-jsonl`):
 
 - **`allow` (default)** - Import orphaned children without parent validation. Most permissive, ensures no data loss even if hierarchy is temporarily broken.
-- **`resurrect`** - Search JSONL history for deleted parents and recreate them as tombstones (Status=Closed, Priority=4). Preserves hierarchy with minimal data. Dependencies are also resurrected on best-effort basis.
+- **`resurrect`** - Search for deleted parents and recreate them as tombstones (Status=Closed, Priority=4). Preserves hierarchy with minimal data.
 - **`skip`** - Skip orphaned children with warning. Partial import succeeds but some issues are excluded.
-- **`strict`** - Fail import immediately if a child's parent is missing. Use when database integrity is critical.
-
-**When to use:**
-- Use `allow` (default) for daily imports and auto-sync
-- Use `resurrect` when importing from databases with deleted parents
-- Use `strict` for controlled imports requiring guaranteed parent existence
-- Use `skip` rarely - only for selective imports
+- **`strict`** - Fail immediately if a child's parent is missing. Use when database integrity is critical.
 
 See [CONFIG.md](CONFIG.md#example-import-orphan-handling) and [TROUBLESHOOTING.md](TROUBLESHOOTING.md#import-fails-with-missing-parent-errors) for more details.
 
@@ -405,43 +620,98 @@ bd info --schema --json                                # Get schema, tables, con
 
 These invariants prevent data loss and would have caught issues like GH #201 (missing issue_prefix after migration).
 
-### Daemon Management
+### Migrate to Sync Branch
 
-See [docs/DAEMON.md](DAEMON.md) for complete daemon management reference.
+Set up a dedicated sync branch for beads data, keeping your working branches clean.
 
 ```bash
-# List all running daemons
-bd daemons list --json
+# Basic setup (creates orphan branch by default)
+bd migrate sync beads-sync                             # Create orphan sync branch
+bd migrate sync beads-sync --dry-run                   # Preview without changes
 
-# Check health (version mismatches, stale sockets)
-bd daemons health --json
+# Force reconfigure if already set up
+bd migrate sync beads-sync --force                     # Reconfigure sync branch
 
-# Stop/restart specific daemon
-bd daemons stop /path/to/workspace --json
-bd daemons restart 12345 --json  # By PID
-
-# View daemon logs
-bd daemons logs /path/to/workspace -n 100
-bd daemons logs 12345 -f  # Follow mode
-
-# Stop all daemons
-bd daemons killall --json
-bd daemons killall --force --json  # Force kill if graceful fails
+# Migrate existing non-orphan branch to orphan
+bd migrate sync beads-sync --orphan                    # Delete and recreate as orphan
 ```
+
+**Behavior:**
+
+| Scenario | Result |
+|----------|--------|
+| Branch doesn't exist | Creates orphan branch (no shared history) |
+| Branch exists locally | Uses existing branch as-is |
+| Branch exists + `--orphan` | Migrates: deletes and recreates as orphan |
+| Remote only | Fetches from remote |
+| Remote only + `--orphan` | Creates local orphan (ignores remote) |
+
+**Why orphan branches?**
+
+- Clean "data sync channel" mental model
+- No accidental merge risk (git warns loudly)
+- Smaller repository footprint (no stale source code)
+- Sync branch contains only `.beads/` directory
+
+**After setup:**
+
+- `bd dolt push` commits beads changes to the sync branch via worktree
+- Your working branch stays clean of beads commits
+- Essential for multi-clone setups where clones work independently
+
+**Safety features for `--orphan` migration:**
+
+- **Unpushed commit check**: If the branch has unpushed commits, migration fails with a helpful error. Use `--force` to override.
+- **Existing worktree**: If a worktree exists for the branch, it's automatically removed before migration.
+- **Non-destructive to remote**: The remote branch is not modified; use `git push --force` to update it after migration.
 
 ### Sync Operations
 
 ```bash
-# Manual sync (force immediate export/import/commit/push)
-bd sync
+# Manual sync (push changes to remote)
+bd dolt push
 
-# What it does:
-# 1. Export pending changes to JSONL
-# 2. Commit to git
-# 3. Pull from remote
-# 4. Import any updates
-# 5. Push to remote
+# Pull changes from remote
+bd dolt pull
+
+# What these do:
+# bd dolt push - Commit pending changes to Dolt and push to remote
+# bd dolt pull - Pull from remote and merge any updates
 ```
+
+### Key-Value Store
+
+Store user-defined key-value pairs that persist across sessions. Useful for feature flags, environment config, or agent memory.
+
+```bash
+# Set a value
+bd kv set <key> <value>
+bd kv set feature_flag true
+bd kv set api_endpoint https://api.example.com
+
+# Get a value
+bd kv get <key>
+bd kv get feature_flag                 # Prints: true
+bd kv get missing_key                  # Prints: missing_key (not set), exits 1
+
+# Delete a key
+bd kv clear <key>
+bd kv clear feature_flag
+
+# List all key-value pairs
+bd kv list
+bd kv list --json                      # Machine-readable output
+```
+
+**Storage notes:**
+- KV data is stored in the local database with a `kv.` prefix
+- KV data syncs via Dolt remotes
+
+**Use cases:**
+- Feature flags: `bd set debug_mode true`
+- Environment config: `bd set staging_url https://staging.example.com`
+- Agent memory: `bd set last_migration 20240115_add_users.sql`
+- Session state: `bd set current_sprint 42`
 
 ## Issue Types
 
@@ -452,6 +722,58 @@ bd sync
 - `chore` - Maintenance work (dependencies, tooling)
 
 **Hierarchical children:** Epics can have child issues with dotted IDs (e.g., `bd-a3f8e9.1`, `bd-a3f8e9.2`). Children are auto-numbered sequentially. Up to 3 levels of nesting supported.
+
+## Issue Statuses
+
+### Built-in Statuses
+
+- `open` - Ready to be worked on
+- `in_progress` - Currently being worked on
+- `blocked` - Cannot proceed (waiting on dependencies)
+- `deferred` - Deliberately put on ice for later
+- `closed` - Work completed
+- `tombstone` - Deleted issue (suppresses resurrections)
+- `pinned` - Stays open indefinitely (used for hooks, anchors)
+
+**Note:** The `pinned` status is used by orchestrators for hook management and persistent work items that should never be auto-closed or cleaned up.
+
+### Custom Statuses
+
+Define custom statuses with optional **categories** that control behavior in `bd ready` and `bd list`:
+
+```bash
+# Simple format (backward compatible — statuses get no category)
+bd config set status.custom "in_review,qa_testing,on_hold"
+
+# Category-annotated format
+bd config set status.custom "in_review:active,qa_testing:wip,on_hold:frozen"
+
+# Mixed format (some with categories, some without)
+bd config set status.custom "in_review:active,legacy_status,archived:done"
+```
+
+**Categories:**
+
+| Category | `bd ready` | Default `bd list` | Icon | Description |
+|----------|-----------|-------------------|------|-------------|
+| `active` | ✓ included | ✓ included | ○ | Ready for work (like `open`) |
+| `wip` | ✗ excluded | ✓ included | ◐ | Work-in-progress (like `in_progress`) |
+| `done` | ✗ excluded | ✗ excluded | ✓ | Terminal state (like `closed`) |
+| `frozen` | ✗ excluded | ✗ excluded | ❄ | On hold (like `deferred`) |
+| *(none)* | ✗ excluded | ✓ included | ◇ | No category — backward compatible default |
+
+**List all statuses** (built-in and custom):
+
+```bash
+bd statuses          # Human-readable table
+bd statuses --json   # JSON output for programmatic use
+```
+
+**Rules:**
+- Status names must match `[a-z][a-z0-9_-]*` (lowercase, letter-first)
+- Cannot collide with built-in status names (case-insensitive)
+- Maximum 50 custom statuses
+- All custom statuses work with `bd list --status <name>`
 
 ## Priorities
 
@@ -471,6 +793,14 @@ bd sync
 Only `blocks` dependencies affect the ready work queue.
 
 **Note:** When creating an issue with a `discovered-from` dependency, the new issue automatically inherits the parent's `source_repo` field.
+
+## External References
+
+The `--external-ref` flag (v0.9.2+) links beads issues to external trackers:
+
+- Supports short form (`gh-123`) or full URL (`https://github.com/...`)
+- Portable via Dolt - survives sync across machines
+- Custom prefixes work for any tracker (`jira-PROJ-456`, `linear-789`)
 
 ## Output Formats
 
@@ -495,9 +825,20 @@ Default output without `--json`:
 
 ```bash
 bd ready
-# bd-42  Fix authentication bug  [P1, bug, in_progress]
-# bd-43  Add user settings page  [P2, feature, open]
+# ○ bd-42 [P1] [bug] - Fix authentication bug
+# ○ bd-43 [P2] [feature] - Add user settings page
 ```
+
+**Dependency visibility:** When issues have blocking dependencies, they appear inline:
+
+```bash
+bd list --parent epic-123
+# ○ bd-123.1 [P1] [task] - Design API (blocks: bd-123.2, bd-123.3)
+# ○ bd-123.2 [P1] [task] - Implement endpoints (blocked by: bd-123.1, blocks: bd-123.3)
+# ○ bd-123.3 [P1] [task] - Add tests (blocked by: bd-123.1, bd-123.2)
+```
+
+This makes blocking relationships visible without running `bd show` on each issue.
 
 ## Common Patterns for AI Agents
 
@@ -508,7 +849,7 @@ bd ready
 bd ready --json
 
 # 2. Claim issue
-bd update bd-42 --status in_progress --json
+bd update bd-42 --claim --json
 
 # 3. Work on it...
 
@@ -550,14 +891,14 @@ bd ready --json  # Find work
 
 # During session
 bd create "..." -p 1 --json
-bd update bd-42 --status in_progress --json
+bd update bd-42 --claim --json
 # ... work ...
 
 # End of session (IMPORTANT!)
-bd sync  # Force immediate sync, bypass debounce
+bd dolt push  # Force immediate sync, bypass debounce
 ```
 
-**ALWAYS run `bd sync` at end of agent sessions** to ensure changes are committed/pushed immediately.
+**ALWAYS run `bd dolt push` at end of agent sessions** to ensure changes are committed/pushed immediately.
 
 ## Editor Integration
 
@@ -566,19 +907,28 @@ bd sync  # Force immediate sync, bypass debounce
 ```bash
 # Setup editor integration (choose based on your editor)
 bd setup factory  # Factory.ai Droid - creates/updates AGENTS.md (universal standard)
-bd setup claude   # Claude Code - installs SessionStart/PreCompact hooks
+bd setup codex    # Codex CLI - creates/updates AGENTS.md
+bd setup mux      # Mux - creates/updates AGENTS.md
+bd setup claude   # Claude Code - installs hooks + manages CLAUDE.md (minimal profile)
+bd setup gemini   # Gemini CLI - installs hooks + manages GEMINI.md (minimal profile)
 bd setup cursor   # Cursor IDE - creates .cursor/rules/beads.mdc
 bd setup aider    # Aider - creates .aider.conf.yml
 
 # Check if integration is installed
 bd setup factory --check
+bd setup codex --check
+bd setup mux --check
 bd setup claude --check
+bd setup gemini --check
 bd setup cursor --check
 bd setup aider --check
 
 # Remove integration
 bd setup factory --remove
+bd setup codex --remove
+bd setup mux --remove
 bd setup claude --remove
+bd setup gemini --remove
 bd setup cursor --remove
 bd setup aider --remove
 ```
@@ -588,13 +938,23 @@ bd setup aider --remove
 bd setup claude              # Install globally (~/.claude/settings.json)
 bd setup claude --project    # Install for this project only
 bd setup claude --stealth    # Use stealth mode (flush only, no git operations)
+bd setup gemini              # Install globally (~/.gemini/settings.json)
+bd setup gemini --project    # Install for this project only
+bd setup gemini --stealth    # Use stealth mode (flush only, no git operations)
+bd setup mux --project       # Also install .mux/AGENTS.md workspace layer
+bd setup mux --global        # Also install ~/.mux/AGENTS.md global layer
 ```
 
 **What each setup does:**
-- **Factory.ai** (`bd setup factory`): Creates or updates AGENTS.md with beads workflow instructions (works with multiple AI tools using the AGENTS.md standard)
-- **Claude Code** (`bd setup claude`): Adds hooks to Claude Code's settings.json that run `bd prime` on SessionStart and PreCompact events
+- **Factory.ai** (`bd setup factory`): Creates or updates AGENTS.md with beads workflow instructions (full profile — works with multiple AI tools using the AGENTS.md standard)
+- **Codex CLI** (`bd setup codex`): Creates or updates AGENTS.md with beads workflow instructions for Codex (full profile)
+- **Mux** (`bd setup mux`): Creates or updates AGENTS.md with beads workflow instructions for Mux workspaces (full profile)
+- **Claude Code** (`bd setup claude`): Adds hooks to Claude Code's settings.json that run `bd prime` on SessionStart and PreCompact events and manages a minimal-profile beads section in `CLAUDE.md`
+- **Gemini CLI** (`bd setup gemini`): Adds hooks to Gemini's settings.json that run `bd prime` on SessionStart and PreCompress events and manages a minimal-profile beads section in `GEMINI.md`
 - **Cursor** (`bd setup cursor`): Creates `.cursor/rules/beads.mdc` with workflow instructions
 - **Aider** (`bd setup aider`): Creates `.aider.conf.yml` with bd workflow instructions
+
+**`--check` behavior:** For section-based integrations (including Claude/Gemini instruction files), reports status as `current` (up to date), `stale` (legacy or hash mismatch — run setup to update), or `missing` (no beads section). Stale and missing return non-zero exit codes.
 
 See also:
 - [INSTALLING.md](INSTALLING.md#ide-and-editor-integrations) - Installation guide
@@ -604,7 +964,7 @@ See also:
 ## See Also
 
 - [AGENTS.md](../AGENTS.md) - Main agent workflow guide
-- [DAEMON.md](DAEMON.md) - Daemon management and event-driven mode
-- [GIT_INTEGRATION.md](GIT_INTEGRATION.md) - Git workflows and merge strategies
+- [MOLECULES.md](MOLECULES.md) - Molecular chemistry metaphor (protos, pour, bond, squash, burn)
+- [GIT_INTEGRATION.md](GIT_INTEGRATION.md) - Git worktrees and protected branches
 - [LABELS.md](../LABELS.md) - Label system guide
 - [README.md](../README.md) - User documentation

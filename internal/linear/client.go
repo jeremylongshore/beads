@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -15,9 +16,37 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// IssuesQuery is the GraphQL query for fetching issues with all required fields.
+// projectsQuery is the GraphQL query for fetching projects.
+const projectsQuery = `
+	query Projects($filter: ProjectFilter!, $first: Int!, $after: String) {
+		projects(
+			first: $first
+			after: $after
+			filter: $filter
+		) {
+			nodes {
+				id
+				name
+				description
+				slugId
+				url
+				state
+				progress
+				createdAt
+				updatedAt
+				completedAt
+			}
+			pageInfo {
+				hasNextPage
+				endCursor
+			}
+		}
+	}
+`
+
+// issuesQuery is the GraphQL query for fetching issues with all required fields.
 // Used by both FetchIssues and FetchIssuesSince for consistency.
-const IssuesQuery = `
+const issuesQuery = `
 	query Issues($filter: IssueFilter!, $first: Int!, $after: String) {
 		issues(
 			first: $first
@@ -92,6 +121,7 @@ func (c *Client) WithEndpoint(endpoint string) *Client {
 	return &Client{
 		APIKey:     c.APIKey,
 		TeamID:     c.TeamID,
+		ProjectID:  c.ProjectID,
 		Endpoint:   endpoint,
 		HTTPClient: c.HTTPClient,
 	}
@@ -103,8 +133,21 @@ func (c *Client) WithHTTPClient(httpClient *http.Client) *Client {
 	return &Client{
 		APIKey:     c.APIKey,
 		TeamID:     c.TeamID,
+		ProjectID:  c.ProjectID,
 		Endpoint:   c.Endpoint,
 		HTTPClient: httpClient,
+	}
+}
+
+// WithProjectID returns a new client configured to filter issues by the specified project.
+// When set, FetchIssues and FetchIssuesSince will only return issues belonging to this project.
+func (c *Client) WithProjectID(projectID string) *Client {
+	return &Client{
+		APIKey:     c.APIKey,
+		TeamID:     c.TeamID,
+		ProjectID:  projectID,
+		Endpoint:   c.Endpoint,
+		HTTPClient: c.HTTPClient,
 	}
 }
 
@@ -132,8 +175,8 @@ func (c *Client) Execute(ctx context.Context, req *GraphQLRequest) (json.RawMess
 			continue
 		}
 
-		respBody, err := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
+		respBody, err := io.ReadAll(io.LimitReader(resp.Body, MaxResponseSize))
+		_ = resp.Body.Close() // Best effort: HTTP body close; connection may be reused regardless
 		if err != nil {
 			lastErr = fmt.Errorf("failed to read response (attempt %d/%d): %w", attempt+1, MaxRetries+1, err)
 			continue
@@ -141,6 +184,9 @@ func (c *Client) Execute(ctx context.Context, req *GraphQLRequest) (json.RawMess
 
 		if resp.StatusCode == http.StatusTooManyRequests {
 			delay := RetryDelay * time.Duration(1<<attempt) // Exponential backoff
+			if half := int64(delay / 2); half > 0 {
+				delay += time.Duration(rand.Int64N(half)) //nolint:gosec // G404: jitter for retry backoff does not need crypto rand
+			}
 			lastErr = fmt.Errorf("rate limited (attempt %d/%d), retrying after %v", attempt+1, MaxRetries+1, delay)
 			select {
 			case <-ctx.Done():
@@ -178,6 +224,7 @@ func (c *Client) Execute(ctx context.Context, req *GraphQLRequest) (json.RawMess
 
 // FetchIssues retrieves issues from Linear with optional filtering by state.
 // state can be: "open" (unstarted/started), "closed" (completed/canceled), or "all".
+// If ProjectID is set on the client, only issues from that project are returned.
 func (c *Client) FetchIssues(ctx context.Context, state string) ([]Issue, error) {
 	var allIssues []Issue
 	var cursor string
@@ -189,6 +236,16 @@ func (c *Client) FetchIssues(ctx context.Context, state string) ([]Issue, error)
 			},
 		},
 	}
+
+	// Add project filter if configured
+	if c.ProjectID != "" {
+		filter["project"] = map[string]interface{}{
+			"id": map[string]interface{}{
+				"eq": c.ProjectID,
+			},
+		}
+	}
+
 	switch state {
 	case "open":
 		filter["state"] = map[string]interface{}{
@@ -204,7 +261,19 @@ func (c *Client) FetchIssues(ctx context.Context, state string) ([]Issue, error)
 		}
 	}
 
+	page := 0
 	for {
+		select {
+		case <-ctx.Done():
+			return allIssues, ctx.Err()
+		default:
+		}
+
+		page++
+		if page > MaxPages {
+			return nil, fmt.Errorf("pagination limit exceeded: stopped after %d pages", MaxPages)
+		}
+
 		variables := map[string]interface{}{
 			"filter": filter,
 			"first":  MaxPageSize,
@@ -214,7 +283,7 @@ func (c *Client) FetchIssues(ctx context.Context, state string) ([]Issue, error)
 		}
 
 		req := &GraphQLRequest{
-			Query:     IssuesQuery,
+			Query:     issuesQuery,
 			Variables: variables,
 		}
 
@@ -242,6 +311,7 @@ func (c *Client) FetchIssues(ctx context.Context, state string) ([]Issue, error)
 // FetchIssuesSince retrieves issues from Linear that have been updated since the given time.
 // This enables incremental sync by only fetching issues modified after the last sync.
 // The state parameter can be: "open", "closed", or "all".
+// If ProjectID is set on the client, only issues from that project are returned.
 func (c *Client) FetchIssuesSince(ctx context.Context, state string, since time.Time) ([]Issue, error) {
 	var allIssues []Issue
 	var cursor string
@@ -260,6 +330,15 @@ func (c *Client) FetchIssuesSince(ctx context.Context, state string, since time.
 		},
 	}
 
+	// Add project filter if configured
+	if c.ProjectID != "" {
+		filter["project"] = map[string]interface{}{
+			"id": map[string]interface{}{
+				"eq": c.ProjectID,
+			},
+		}
+	}
+
 	// Add state filter if specified
 	switch state {
 	case "open":
@@ -276,7 +355,19 @@ func (c *Client) FetchIssuesSince(ctx context.Context, state string, since time.
 		}
 	}
 
+	page := 0
 	for {
+		select {
+		case <-ctx.Done():
+			return allIssues, ctx.Err()
+		default:
+		}
+
+		page++
+		if page > MaxPages {
+			return nil, fmt.Errorf("pagination limit exceeded: stopped after %d pages", MaxPages)
+		}
+
 		variables := map[string]interface{}{
 			"filter": filter,
 			"first":  MaxPageSize,
@@ -286,7 +377,7 @@ func (c *Client) FetchIssuesSince(ctx context.Context, state string, since time.
 		}
 
 		req := &GraphQLRequest{
-			Query:     IssuesQuery,
+			Query:     issuesQuery,
 			Variables: variables,
 		}
 
@@ -381,6 +472,11 @@ func (c *Client) CreateIssue(ctx context.Context, title, description string, pri
 		"teamId":      c.TeamID,
 		"title":       title,
 		"description": description,
+	}
+
+	// Include project if configured
+	if c.ProjectID != "" {
+		input["projectId"] = c.ProjectID
 	}
 
 	if priority > 0 {
@@ -666,4 +762,159 @@ func (c *Client) FetchTeams(ctx context.Context) ([]Team, error) {
 	}
 
 	return teamsResp.Teams.Nodes, nil
+}
+
+// FetchProjects retrieves projects from Linear with optional filtering by state.
+// state can be: "planned", "started", "paused", "completed", "canceled", or "all"/"".
+func (c *Client) FetchProjects(ctx context.Context, state string) ([]Project, error) {
+	var allProjects []Project
+	var cursor string
+
+	filter := map[string]interface{}{
+		"team": map[string]interface{}{
+			"id": map[string]interface{}{
+				"eq": c.TeamID,
+			},
+		},
+	}
+
+	if state != "all" && state != "" {
+		filter["state"] = map[string]interface{}{
+			"eq": state,
+		}
+	}
+
+	for {
+		variables := map[string]interface{}{
+			"filter": filter,
+			"first":  MaxPageSize,
+		}
+		if cursor != "" {
+			variables["after"] = cursor
+		}
+
+		req := &GraphQLRequest{
+			Query:     projectsQuery,
+			Variables: variables,
+		}
+
+		data, err := c.Execute(ctx, req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch projects: %w", err)
+		}
+
+		var projectsResp ProjectsResponse
+		if err := json.Unmarshal(data, &projectsResp); err != nil {
+			return nil, fmt.Errorf("failed to parse projects response: %w", err)
+		}
+
+		allProjects = append(allProjects, projectsResp.Projects.Nodes...)
+
+		if !projectsResp.Projects.PageInfo.HasNextPage {
+			break
+		}
+		cursor = projectsResp.Projects.PageInfo.EndCursor
+	}
+
+	return allProjects, nil
+}
+
+// CreateProject creates a new project in Linear.
+func (c *Client) CreateProject(ctx context.Context, name, description, state string) (*Project, error) {
+	query := `
+		mutation CreateProject($input: ProjectCreateInput!) {
+			projectCreate(input: $input) {
+				success
+				project {
+					id
+					name
+					description
+					slugId
+					url
+					state
+					progress
+					createdAt
+					updatedAt
+				}
+			}
+		}
+	`
+
+	input := map[string]interface{}{
+		"teamIds":     []string{c.TeamID},
+		"name":        name,
+		"description": description,
+	}
+
+	if state != "" {
+		input["state"] = state
+	}
+
+	req := &GraphQLRequest{
+		Query: query,
+		Variables: map[string]interface{}{
+			"input": input,
+		},
+	}
+
+	data, err := c.Execute(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create project: %w", err)
+	}
+
+	var createResp ProjectCreateResponse
+	if err := json.Unmarshal(data, &createResp); err != nil {
+		return nil, fmt.Errorf("failed to parse create project response: %w", err)
+	}
+
+	if !createResp.ProjectCreate.Success {
+		return nil, fmt.Errorf("project creation reported as unsuccessful")
+	}
+
+	return &createResp.ProjectCreate.Project, nil
+}
+
+// UpdateProject updates an existing project in Linear.
+func (c *Client) UpdateProject(ctx context.Context, projectID string, updates map[string]interface{}) (*Project, error) {
+	query := `
+		mutation UpdateProject($id: String!, $input: ProjectUpdateInput!) {
+			projectUpdate(id: $id, input: $input) {
+				success
+				project {
+					id
+					name
+					description
+					slugId
+					url
+					state
+					progress
+					updatedAt
+				}
+			}
+		}
+	`
+
+	req := &GraphQLRequest{
+		Query: query,
+		Variables: map[string]interface{}{
+			"id":    projectID,
+			"input": updates,
+		},
+	}
+
+	data, err := c.Execute(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to update project: %w", err)
+	}
+
+	var updateResp ProjectUpdateResponse
+	if err := json.Unmarshal(data, &updateResp); err != nil {
+		return nil, fmt.Errorf("failed to parse update project response: %w", err)
+	}
+
+	if !updateResp.ProjectUpdate.Success {
+		return nil, fmt.Errorf("project update reported as unsuccessful")
+	}
+
+	return &updateResp.ProjectUpdate.Project, nil
 }

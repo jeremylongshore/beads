@@ -23,21 +23,21 @@ if ! command -v bd &> /dev/null; then
   echo "❌ Error: bd command not found"
   echo
   echo "Install bd:"
-  echo "  curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/install.sh | bash"
+  echo "  curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash"
   echo
   exit 1
 fi
 
 # Preview candidates
 echo "--- Preview Tier 1 Candidates ---"
-bd compact --dry-run --all
+bd admin compact --dry-run --all
 
 echo
 read -p "Proceed with Tier 1 compaction? (y/N) " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
   echo "--- Running Tier 1 Compaction ---"
-  bd compact --all
+  bd admin compact --all
   echo "✅ Tier 1 compaction complete"
 else
   echo "⏭️  Skipping Tier 1"
@@ -46,14 +46,14 @@ fi
 # Preview Tier 2
 echo
 echo "--- Preview Tier 2 Candidates ---"
-bd compact --dry-run --all --tier 2
+bd admin compact --dry-run --all --tier 2
 
 echo
 read -p "Proceed with Tier 2 compaction? (y/N) " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
   echo "--- Running Tier 2 Compaction ---"
-  bd compact --all --tier 2
+  bd admin compact --all --tier 2
   echo "✅ Tier 2 compaction complete"
 else
   echo "⏭️  Skipping Tier 2"
@@ -62,7 +62,7 @@ fi
 # Show stats
 echo
 echo "--- Final Statistics ---"
-bd compact --stats
+bd admin compact --stats
 
 echo
 echo "=== Compaction Complete ==="

@@ -1,148 +1,75 @@
+//go:build cgo
+
 package doctor
 
 import (
 	"bufio"
-	"bytes"
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/storage/sqlite"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
-// CheckMergeArtifacts detects temporary git merge files in .beads directory.
-// These are created during git merges and should be cleaned up.
-func CheckMergeArtifacts(path string) DoctorCheck {
-	beadsDir := filepath.Join(path, ".beads")
-
-	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
-		return DoctorCheck{
-			Name:    "Merge Artifacts",
-			Status:  "ok",
-			Message: "N/A (no .beads directory)",
-		}
-	}
-
-	// Read patterns from .beads/.gitignore (merge artifacts section)
-	patterns, err := readMergeArtifactPatterns(beadsDir)
+// openStoreDB opens the beads database and returns the underlying *sql.DB for
+// raw queries. The caller must close the returned store when done.
+func openStoreDB(beadsDir string) (*sql.DB, storage.DoltStorage, error) {
+	ctx := context.Background()
+	doltPath := getDatabasePath(beadsDir)
+	cfg := doltServerConfig(beadsDir, doltPath)
+	store, err := dolt.New(ctx, cfg)
 	if err != nil {
-		// No .gitignore or can't read it - use default patterns
-		patterns = []string{
-			"*.base.jsonl",
-			"*.left.jsonl",
-			"*.right.jsonl",
-			"*.meta.json",
-		}
+		return nil, nil, err
 	}
-
-	// Find matching files
-	var artifacts []string
-	for _, pattern := range patterns {
-		matches, err := filepath.Glob(filepath.Join(beadsDir, pattern))
-		if err != nil {
-			continue
-		}
-		artifacts = append(artifacts, matches...)
+	db := store.UnderlyingDB()
+	if db == nil {
+		_ = store.Close() // Best effort cleanup
+		return nil, nil, fmt.Errorf("storage backend has no underlying database")
 	}
-
-	if len(artifacts) == 0 {
-		return DoctorCheck{
-			Name:    "Merge Artifacts",
-			Status:  "ok",
-			Message: "No merge artifacts found",
-		}
-	}
-
-	// Build list of relative paths for display
-	var relPaths []string
-	for _, f := range artifacts {
-		if rel, err := filepath.Rel(beadsDir, f); err == nil {
-			relPaths = append(relPaths, rel)
-		}
-	}
-
-	return DoctorCheck{
-		Name:    "Merge Artifacts",
-		Status:  "warning",
-		Message: fmt.Sprintf("%d temporary merge file(s) found", len(artifacts)),
-		Detail:  strings.Join(relPaths, ", "),
-		Fix:     "Run 'bd doctor --fix' to remove merge artifacts",
-	}
-}
-
-// readMergeArtifactPatterns reads patterns from .beads/.gitignore merge section
-func readMergeArtifactPatterns(beadsDir string) ([]string, error) {
-	gitignorePath := filepath.Join(beadsDir, ".gitignore")
-	file, err := os.Open(gitignorePath) // #nosec G304 - path constructed from beadsDir
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	var patterns []string
-	inMergeSection := false
-	scanner := bufio.NewScanner(file)
-
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-
-		if strings.Contains(line, "Merge artifacts") {
-			inMergeSection = true
-			continue
-		}
-
-		if inMergeSection && strings.HasPrefix(line, "#") {
-			break
-		}
-
-		if inMergeSection && line != "" && !strings.HasPrefix(line, "#") && !strings.HasPrefix(line, "!") {
-			patterns = append(patterns, line)
-		}
-	}
-
-	return patterns, scanner.Err()
+	return db, store, nil
 }
 
 // CheckOrphanedDependencies detects dependencies pointing to non-existent issues.
 func CheckOrphanedDependencies(path string) DoctorCheck {
-	beadsDir := filepath.Join(path, ".beads")
-	dbPath := filepath.Join(beadsDir, beads.CanonicalDatabaseName)
+	// Follow redirect to resolve actual beads directory (bd-tvus fix)
+	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
-	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+	db, store, err := openStoreDB(beadsDir)
+	if err != nil {
 		return DoctorCheck{
 			Name:    "Orphaned Dependencies",
 			Status:  "ok",
 			Message: "N/A (no database)",
 		}
 	}
+	defer func() { _ = store.Close() }()
 
-	// Open database read-only
-	db, err := openDBReadOnly(dbPath)
-	if err != nil {
-		return DoctorCheck{
-			Name:    "Orphaned Dependencies",
-			Status:  "ok",
-			Message: "N/A (unable to open database)",
-		}
-	}
-	defer db.Close()
+	return checkOrphanedDependenciesDB(db)
+}
 
-	// Query for orphaned dependencies
+// checkOrphanedDependenciesDB is the core logic for CheckOrphanedDependencies.
+func checkOrphanedDependenciesDB(db *sql.DB) DoctorCheck {
+	// Query for orphaned dependencies.
+	// Exclude external: refs — these are synthetic cross-rig tracking deps
+	// injected by the JSONL exporter and intentionally reference issues not
+	// present in the local database (#1593).
 	query := `
 		SELECT d.issue_id, d.depends_on_id, d.type
 		FROM dependencies d
 		LEFT JOIN issues i ON d.depends_on_id = i.id
 		WHERE i.id IS NULL
+		  AND d.depends_on_id NOT LIKE 'external:%'
 	`
 	rows, err := db.Query(query)
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Orphaned Dependencies",
-			Status:  "ok",
+			Status:  StatusWarning,
 			Message: "N/A (query failed)",
 		}
 	}
@@ -153,6 +80,14 @@ func CheckOrphanedDependencies(path string) DoctorCheck {
 		var issueID, dependsOnID, depType string
 		if err := rows.Scan(&issueID, &dependsOnID, &depType); err == nil {
 			orphans = append(orphans, fmt.Sprintf("%s→%s", issueID, dependsOnID))
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return DoctorCheck{
+			Name:    "Orphaned Dependencies",
+			Status:  StatusWarning,
+			Message: "Row iteration error",
+			Detail:  err.Error(),
 		}
 	}
 
@@ -179,59 +114,62 @@ func CheckOrphanedDependencies(path string) DoctorCheck {
 }
 
 // CheckDuplicateIssues detects issues with identical content.
-func CheckDuplicateIssues(path string) DoctorCheck {
-	beadsDir := filepath.Join(path, ".beads")
-	dbPath := filepath.Join(beadsDir, beads.CanonicalDatabaseName)
+// When orchestratorMode is true, the threshold parameter defines how many duplicates
+// are acceptable before warning (default 1000 for orchestrator's ephemeral wisps).
+func CheckDuplicateIssues(path string, orchestratorMode bool, orchestratorThreshold int) DoctorCheck {
+	// Follow redirect to resolve actual beads directory (bd-tvus fix)
+	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
-	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		return DoctorCheck{
-			Name:    "Duplicate Issues",
-			Status:  "ok",
-			Message: "N/A (no database)",
-		}
-	}
-
-	// Open store to use existing duplicate detection
-	ctx := context.Background()
-	store, err := sqlite.New(ctx, dbPath)
+	db, store, err := openStoreDB(beadsDir)
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Duplicate Issues",
-			Status:  "ok",
-			Message: "N/A (unable to open database)",
+			Status:  StatusOK,
+			Message: "N/A (no database)",
 		}
 	}
 	defer func() { _ = store.Close() }()
 
-	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
-	if err != nil {
+	return checkDuplicateIssuesDB(db, orchestratorMode, orchestratorThreshold)
+}
+
+// checkDuplicateIssuesDB is the core logic for CheckDuplicateIssues, operating
+// on a *sql.DB directly. This enables fast testing with branch-per-test isolation
+// instead of per-test database creation.
+func checkDuplicateIssuesDB(db *sql.DB, orchestratorMode bool, orchestratorThreshold int) DoctorCheck {
+	// Use SQL aggregation to find duplicates without loading all issues into memory.
+	// The old approach loaded every issue via SearchIssues which was O(n) in both
+	// time and memory — catastrophically slow on large databases (e.g., 23k+ issues
+	// took 66 seconds over MySQL wire protocol).
+	query := `
+		SELECT COUNT(*) as group_count, SUM(cnt - 1) as dup_count
+		FROM (
+			SELECT COUNT(*) as cnt
+			FROM issues
+			WHERE status != 'closed'
+			GROUP BY title, description, design, acceptance_criteria, status
+			HAVING COUNT(*) > 1
+		) dups
+	`
+	var groupCount, dupCount sql.NullInt64
+	if err := db.QueryRow(query).Scan(&groupCount, &dupCount); err != nil {
 		return DoctorCheck{
 			Name:    "Duplicate Issues",
-			Status:  "ok",
+			Status:  StatusWarning,
 			Message: "N/A (unable to query issues)",
 		}
 	}
 
-	// Find duplicates by title+description hash
-	seen := make(map[string][]string) // hash -> list of IDs
-	for _, issue := range issues {
-		if issue.Status == types.StatusTombstone {
-			continue
-		}
-		key := issue.Title + "|" + issue.Description
-		seen[key] = append(seen[key], issue.ID)
+	duplicateGroups := int(groupCount.Int64)
+	totalDuplicates := int(dupCount.Int64)
+
+	// Apply threshold based on mode
+	threshold := 0 // Default: any duplicates are warnings
+	if orchestratorMode {
+		threshold = orchestratorThreshold // Orchestrator: configurable threshold (default 1000)
 	}
 
-	var duplicateGroups int
-	var totalDuplicates int
-	for _, ids := range seen {
-		if len(ids) > 1 {
-			duplicateGroups++
-			totalDuplicates += len(ids) - 1 // exclude the canonical one
-		}
-	}
-
-	if duplicateGroups == 0 {
+	if totalDuplicates == 0 {
 		return DoctorCheck{
 			Name:    "Duplicate Issues",
 			Status:  "ok",
@@ -239,43 +177,48 @@ func CheckDuplicateIssues(path string) DoctorCheck {
 		}
 	}
 
+	// Only warn if duplicate count exceeds threshold
+	if totalDuplicates > threshold {
+		return DoctorCheck{
+			Name:    "Duplicate Issues",
+			Status:  "warning",
+			Message: fmt.Sprintf("%d duplicate issue(s) in %d group(s)", totalDuplicates, duplicateGroups),
+			Detail:  "Duplicates cannot be auto-fixed",
+			Fix:     "Run 'bd duplicates' to review and merge duplicates",
+		}
+	}
+
+	// Under threshold - OK
+	message := "No duplicate issues"
+	if orchestratorMode && totalDuplicates > 0 {
+		message = fmt.Sprintf("%d duplicate(s) detected (within orchestrator threshold of %d)", totalDuplicates, threshold)
+	}
 	return DoctorCheck{
 		Name:    "Duplicate Issues",
-		Status:  "warning",
-		Message: fmt.Sprintf("%d duplicate issue(s) in %d group(s)", totalDuplicates, duplicateGroups),
-		Detail:  "Duplicates cannot be auto-fixed",
-		Fix:     "Run 'bd duplicates' to review and merge duplicates",
+		Status:  "ok",
+		Message: message,
 	}
 }
 
 // CheckTestPollution detects test issues that may have leaked into the database.
 func CheckTestPollution(path string) DoctorCheck {
-	beadsDir := filepath.Join(path, ".beads")
-	dbPath := filepath.Join(beadsDir, beads.CanonicalDatabaseName)
+	// Follow redirect to resolve actual beads directory (bd-tvus fix)
+	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
-	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+	db, store, err := openStoreDB(beadsDir)
+	if err != nil {
 		return DoctorCheck{
 			Name:    "Test Pollution",
 			Status:  "ok",
 			Message: "N/A (no database)",
 		}
 	}
-
-	db, err := openDBReadOnly(dbPath)
-	if err != nil {
-		return DoctorCheck{
-			Name:    "Test Pollution",
-			Status:  "ok",
-			Message: "N/A (unable to open database)",
-		}
-	}
-	defer db.Close()
+	defer func() { _ = store.Close() }()
 
 	// Look for common test patterns in titles
 	query := `
 		SELECT COUNT(*) FROM issues
-		WHERE status != 'tombstone'
-		AND (
+		WHERE (
 			title LIKE 'test-%' OR
 			title LIKE 'Test Issue%' OR
 			title LIKE '%test issue%' OR
@@ -286,7 +229,7 @@ func CheckTestPollution(path string) DoctorCheck {
 	if err := db.QueryRow(query).Scan(&count); err != nil {
 		return DoctorCheck{
 			Name:    "Test Pollution",
-			Status:  "ok",
+			Status:  StatusWarning,
 			Message: "N/A (query failed)",
 		}
 	}
@@ -304,57 +247,234 @@ func CheckTestPollution(path string) DoctorCheck {
 		Status:  "warning",
 		Message: fmt.Sprintf("%d potential test issue(s) detected", count),
 		Detail:  "Test issues may have leaked into production database",
-		Fix:     "Run 'bd detect-pollution' to review and clean test issues",
+		Fix:     "Run 'bd doctor --check=pollution' to review and clean test issues",
 	}
 }
 
-// CheckGitConflicts detects git conflict markers in JSONL file.
+// CheckGitConflicts detects unresolved merge conflicts.
+// For Dolt backends, queries the dolt_conflicts system table (GH-2249).
+// For legacy backends, scans JSONL files for git conflict markers.
 func CheckGitConflicts(path string) DoctorCheck {
-	beadsDir := filepath.Join(path, ".beads")
-	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	backend, beadsDir := getBackendAndBeadsDir(path)
 
-	if _, err := os.Stat(jsonlPath); os.IsNotExist(err) {
+	// Dolt backend: check for unresolved Dolt merge conflicts
+	if backend == configfile.BackendDolt {
+		return checkDoltConflicts(beadsDir)
+	}
+
+	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
 		return DoctorCheck{
 			Name:    "Git Conflicts",
-			Status:  "ok",
-			Message: "N/A (no JSONL file)",
+			Status:  StatusOK,
+			Message: "N/A (no .beads directory)",
 		}
 	}
 
-	data, err := os.ReadFile(jsonlPath) // #nosec G304 - path constructed safely
-	if err != nil {
+	// Legacy: scan JSONL files for conflict markers
+	matches, err := filepath.Glob(filepath.Join(beadsDir, "*.jsonl"))
+	if err != nil || len(matches) == 0 {
 		return DoctorCheck{
 			Name:    "Git Conflicts",
-			Status:  "ok",
-			Message: "N/A (unable to read JSONL)",
+			Status:  StatusOK,
+			Message: "No JSONL files to check",
 		}
 	}
 
-	// Look for conflict markers at start of lines
-	lines := bytes.Split(data, []byte("\n"))
-	var conflictLines []int
-	for i, line := range lines {
-		trimmed := bytes.TrimSpace(line)
-		if bytes.HasPrefix(trimmed, []byte("<<<<<<< ")) ||
-			bytes.Equal(trimmed, []byte("=======")) ||
-			bytes.HasPrefix(trimmed, []byte(">>>>>>> ")) {
-			conflictLines = append(conflictLines, i+1)
+	var conflictFiles []string
+	for _, fpath := range matches {
+		f, err := os.Open(fpath) // #nosec G304 - path constructed from beadsDir
+		if err != nil {
+			continue
+		}
+		scanner := bufio.NewScanner(f)
+		hasConflict := false
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.HasPrefix(line, "<<<<<<<") || strings.HasPrefix(line, ">>>>>>>") || strings.HasPrefix(line, "=======") {
+				hasConflict = true
+				break
+			}
+		}
+		_ = f.Close()
+		if hasConflict {
+			if rel, err := filepath.Rel(beadsDir, fpath); err == nil {
+				conflictFiles = append(conflictFiles, rel)
+			} else {
+				conflictFiles = append(conflictFiles, filepath.Base(fpath))
+			}
 		}
 	}
 
-	if len(conflictLines) == 0 {
+	if len(conflictFiles) == 0 {
 		return DoctorCheck{
 			Name:    "Git Conflicts",
-			Status:  "ok",
-			Message: "No git conflicts in JSONL",
+			Status:  StatusOK,
+			Message: "No conflict markers found",
 		}
 	}
 
 	return DoctorCheck{
 		Name:    "Git Conflicts",
-		Status:  "error",
-		Message: fmt.Sprintf("Git conflict markers found at %d location(s)", len(conflictLines)),
-		Detail:  fmt.Sprintf("Conflict markers at lines: %v", conflictLines),
-		Fix:     "Resolve conflicts manually: git checkout --ours or --theirs .beads/issues.jsonl",
+		Status:  StatusError,
+		Message: fmt.Sprintf("Unresolved git conflicts in %d file(s)", len(conflictFiles)),
+		Detail:  strings.Join(conflictFiles, ", "),
+		Fix:     "Resolve merge conflicts in .beads/ files, then commit",
+	}
+}
+
+// CheckChildParentDependencies detects child→parent blocking dependencies.
+// These often indicate a modeling mistake (deadlock: child waits for parent, parent waits for children).
+// However, they may be intentional in some workflows, so removal requires explicit opt-in.
+func CheckChildParentDependencies(path string) DoctorCheck {
+	// Follow redirect to resolve actual beads directory (bd-tvus fix)
+	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+
+	db, store, err := openStoreDB(beadsDir)
+	if err != nil {
+		return DoctorCheck{
+			Name:    "Child-Parent Dependencies",
+			Status:  "ok",
+			Message: "N/A (no database)",
+		}
+	}
+	defer func() { _ = store.Close() }()
+
+	return checkChildParentDependenciesDB(db)
+}
+
+// checkDoltConflicts queries the Dolt server for unresolved merge conflicts (GH-2249).
+func checkDoltConflicts(beadsDir string) DoctorCheck {
+	doltPath := getDatabasePath(beadsDir)
+	if _, err := os.Stat(doltPath); os.IsNotExist(err) {
+		return DoctorCheck{
+			Name:    "Git Conflicts",
+			Status:  StatusOK,
+			Message: "N/A (no Dolt database)",
+		}
+	}
+
+	db, store, err := openStoreDB(beadsDir)
+	if err != nil {
+		return DoctorCheck{
+			Name:    "Git Conflicts",
+			Status:  StatusOK,
+			Message: "N/A (unable to open database)",
+		}
+	}
+	defer func() { _ = store.Close() }()
+
+	rows, err := db.Query("SELECT `table`, num_conflicts FROM dolt_conflicts")
+	if err != nil {
+		// Table may not exist in older Dolt versions — not an error
+		if strings.Contains(err.Error(), "no such table") || strings.Contains(err.Error(), "doesn't exist") {
+			return DoctorCheck{
+				Name:    "Git Conflicts",
+				Status:  StatusOK,
+				Message: "No conflicts",
+			}
+		}
+		return DoctorCheck{
+			Name:    "Git Conflicts",
+			Status:  StatusWarning,
+			Message: "Unable to check Dolt conflicts",
+			Detail:  err.Error(),
+		}
+	}
+	defer rows.Close()
+
+	var tables []string
+	totalConflicts := 0
+	for rows.Next() {
+		var tableName string
+		var numConflicts int
+		if err := rows.Scan(&tableName, &numConflicts); err == nil && numConflicts > 0 {
+			tables = append(tables, fmt.Sprintf("%s (%d)", tableName, numConflicts))
+			totalConflicts += numConflicts
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return DoctorCheck{
+			Name:    "Git Conflicts",
+			Status:  StatusWarning,
+			Message: "Error reading Dolt conflicts",
+			Detail:  err.Error(),
+		}
+	}
+
+	if totalConflicts == 0 {
+		return DoctorCheck{
+			Name:    "Git Conflicts",
+			Status:  StatusOK,
+			Message: "No Dolt merge conflicts",
+		}
+	}
+
+	return DoctorCheck{
+		Name:    "Git Conflicts",
+		Status:  StatusError,
+		Message: fmt.Sprintf("Unresolved Dolt merge conflicts in %d table(s)", len(tables)),
+		Detail:  strings.Join(tables, ", "),
+		Fix:     "Resolve conflicts with 'bd dolt conflicts resolve' or 'dolt conflicts resolve --ours/--theirs'",
+	}
+}
+
+// checkChildParentDependenciesDB is the core logic for CheckChildParentDependencies.
+func checkChildParentDependenciesDB(db *sql.DB) DoctorCheck {
+	// Query for child→parent BLOCKING dependencies where issue_id starts with depends_on_id + "."
+	// Only matches blocking types (blocks, conditional-blocks, waits-for) that cause deadlock.
+	// Excludes 'parent-child' type which is a legitimate structural hierarchy relationship.
+	query := `
+		SELECT d.issue_id, d.depends_on_id
+		FROM dependencies d
+		WHERE d.issue_id LIKE CONCAT(d.depends_on_id, '.%')
+		  AND d.type IN ('blocks', 'conditional-blocks', 'waits-for')
+	`
+	rows, err := db.Query(query)
+	if err != nil {
+		return DoctorCheck{
+			Name:    "Child-Parent Dependencies",
+			Status:  StatusWarning,
+			Message: "N/A (query failed)",
+		}
+	}
+	defer rows.Close()
+
+	var badDeps []string
+	for rows.Next() {
+		var issueID, dependsOnID string
+		if err := rows.Scan(&issueID, &dependsOnID); err == nil {
+			badDeps = append(badDeps, fmt.Sprintf("%s→%s", issueID, dependsOnID))
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return DoctorCheck{
+			Name:    "Child-Parent Dependencies",
+			Status:  StatusWarning,
+			Message: "Row iteration error",
+			Detail:  err.Error(),
+		}
+	}
+
+	if len(badDeps) == 0 {
+		return DoctorCheck{
+			Name:     "Child-Parent Dependencies",
+			Status:   "ok",
+			Message:  "No child→parent dependencies",
+			Category: CategoryMetadata,
+		}
+	}
+
+	detail := strings.Join(badDeps, ", ")
+	if len(detail) > 200 {
+		detail = detail[:200] + "..."
+	}
+
+	return DoctorCheck{
+		Name:     "Child-Parent Dependencies",
+		Status:   "warning",
+		Message:  fmt.Sprintf("%d child→parent dependency detected (may cause deadlock)", len(badDeps)),
+		Detail:   detail,
+		Fix:      "Run 'bd doctor --fix --fix-child-parent' to remove (if unintentional)",
+		Category: CategoryMetadata,
 	}
 }

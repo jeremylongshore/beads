@@ -1,15 +1,34 @@
 # Agent Instructions
 
-This project uses **bd** (beads) for issue tracking. Run `bd onboard` to get started.
+This project uses **bd** (beads) for issue tracking. Run `bd prime` for full workflow context.
 
 ## Quick Reference
 
 ```bash
-bd ready              # Find available work
+bd ready              # Find available work (open, no blockers)
+bd blocked            # Show blocked issues and what blocks them
+bd list               # List all issues (with blocker annotations)
 bd show <id>          # View issue details
-bd update <id> --status in_progress  # Claim work
+bd claim <id>         # Claim work (atomic compare-and-swap)
 bd close <id>         # Complete work
-bd sync               # Sync with git
+bd dolt push          # Push to Dolt remote
+```
+
+**Dependency status**: `bd ready` and `bd blocked` are the authoritative
+sources for whether work is blocked. `bd list` shows active blocker
+annotations but use `bd ready`/`bd blocked` for accurate blocking status.
+
+## Agent Warning: Interactive Commands
+
+**DO NOT use `bd edit`** - it opens an interactive editor ($EDITOR) which AI agents cannot use.
+
+Use `bd update` with flags instead:
+```bash
+bd update <id> --description "new description"
+bd update <id> --title "new title"
+bd update <id> --design "design notes"
+bd update <id> --notes "additional notes"
+bd update <id> --acceptance "acceptance criteria"
 ```
 
 ## Landing the Plane (Session Completion)
@@ -24,7 +43,6 @@ bd sync               # Sync with git
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
    git pull --rebase
-   bd sync
    git push
    git status  # MUST show "up to date with origin"
    ```

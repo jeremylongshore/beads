@@ -11,6 +11,8 @@ import (
 	"context"
 
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -21,9 +23,53 @@ type Storage = beads.Storage
 // Use Storage.RunInTransaction() to obtain a Transaction instance.
 type Transaction = beads.Transaction
 
-// NewSQLiteStorage creates a new SQLite storage instance at the given path
-func NewSQLiteStorage(ctx context.Context, dbPath string) (Storage, error) {
-	return beads.NewSQLiteStorage(ctx, dbPath)
+// RemoteStore provides dolt remote management and replication operations.
+// Use type assertion on a Storage value to access these methods:
+//
+//	if rs, ok := store.(beads.RemoteStore); ok {
+//	    rs.Push(ctx)
+//	}
+type RemoteStore = storage.RemoteStore
+
+// SyncStore provides high-level sync operations with peers.
+type SyncStore = storage.SyncStore
+
+// VersionControlReader provides read-only version control operations.
+// Write operations (Branch, Checkout, Merge, DeleteBranch) are not yet
+// part of the public API. If you need them, please open an issue.
+type VersionControlReader interface {
+	CurrentBranch(ctx context.Context) (string, error)
+	ListBranches(ctx context.Context) ([]string, error)
+	CommitExists(ctx context.Context, commitHash string) (bool, error)
+	GetCurrentCommit(ctx context.Context) (string, error)
+	Status(ctx context.Context) (*VCStatus, error)
+	Log(ctx context.Context, limit int) ([]CommitInfo, error)
+}
+
+// Replication and version control types from internal/storage
+type (
+	RemoteInfo  = storage.RemoteInfo
+	SyncResult  = storage.SyncResult
+	SyncStatus  = storage.SyncStatus
+	Conflict    = storage.Conflict
+	CommitInfo  = storage.CommitInfo
+	VCStatus    = storage.Status
+	StatusEntry = storage.StatusEntry
+)
+
+// Open opens a Dolt-backed beads database at the given path.
+// This always opens in embedded mode. Use OpenFromConfig to respect
+// server mode settings from metadata.json.
+func Open(ctx context.Context, dbPath string) (Storage, error) {
+	return dolt.New(ctx, &dolt.Config{Path: dbPath, CreateIfMissing: true})
+}
+
+// OpenFromConfig opens a beads database using configuration from metadata.json.
+// Unlike Open, this respects Dolt server mode settings and database name
+// configuration, connecting to the Dolt SQL server when dolt_mode is "server".
+// beadsDir is the path to the .beads directory.
+func OpenFromConfig(ctx context.Context, beadsDir string) (Storage, error) {
+	return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{CreateIfMissing: true})
 }
 
 // FindDatabasePath finds the beads database in the current directory tree
@@ -31,15 +77,10 @@ func FindDatabasePath() string {
 	return beads.FindDatabasePath()
 }
 
-// FindBeadsDir finds the .beads/ directory in the current directory tree
-// Returns empty string if not found. Supports both database and JSONL-only mode.
+// FindBeadsDir finds the .beads/ directory in the current directory tree.
+// Returns empty string if not found.
 func FindBeadsDir() string {
 	return beads.FindBeadsDir()
-}
-
-// FindJSONLPath finds the JSONL file corresponding to a database path
-func FindJSONLPath(dbPath string) string {
-	return beads.FindJSONLPath(dbPath)
 }
 
 // DatabaseInfo contains information about a beads database
@@ -50,26 +91,37 @@ func FindAllDatabases() []DatabaseInfo {
 	return beads.FindAllDatabases()
 }
 
+// RedirectInfo contains information about a beads directory redirect
+type RedirectInfo = beads.RedirectInfo
+
+// GetRedirectInfo checks if the current beads directory is redirected.
+// Returns RedirectInfo with IsRedirected=true if a redirect is active.
+func GetRedirectInfo() RedirectInfo {
+	return beads.GetRedirectInfo()
+}
+
 // Core types from internal/types
 type (
-	Issue              = types.Issue
-	Status             = types.Status
-	IssueType          = types.IssueType
-	Dependency         = types.Dependency
-	DependencyType     = types.DependencyType
-	Label              = types.Label
-	Comment            = types.Comment
-	Event              = types.Event
-	EventType          = types.EventType
-	BlockedIssue       = types.BlockedIssue
-	TreeNode           = types.TreeNode
-	IssueFilter        = types.IssueFilter
-	WorkFilter         = types.WorkFilter
-	StaleFilter        = types.StaleFilter
-	DependencyCounts   = types.DependencyCounts
-	IssueWithCounts    = types.IssueWithCounts
-	SortPolicy         = types.SortPolicy
-	EpicStatus         = types.EpicStatus
+	Issue                       = types.Issue
+	Status                      = types.Status
+	IssueType                   = types.IssueType
+	Dependency                  = types.Dependency
+	DependencyType              = types.DependencyType
+	Label                       = types.Label
+	Comment                     = types.Comment
+	Event                       = types.Event
+	EventType                   = types.EventType
+	BlockedIssue                = types.BlockedIssue
+	TreeNode                    = types.TreeNode
+	IssueFilter                 = types.IssueFilter
+	WorkFilter                  = types.WorkFilter
+	StaleFilter                 = types.StaleFilter
+	DependencyCounts            = types.DependencyCounts
+	IssueWithCounts             = types.IssueWithCounts
+	IssueWithDependencyMetadata = types.IssueWithDependencyMetadata
+	SortPolicy                  = types.SortPolicy
+	EpicStatus                  = types.EpicStatus
+	WispFilter                  = types.WispFilter
 )
 
 // Status constants
@@ -92,10 +144,11 @@ const (
 
 // DependencyType constants
 const (
-	DepBlocks         = types.DepBlocks
-	DepRelated        = types.DepRelated
-	DepParentChild    = types.DepParentChild
-	DepDiscoveredFrom = types.DepDiscoveredFrom
+	DepBlocks            = types.DepBlocks
+	DepRelated           = types.DepRelated
+	DepParentChild       = types.DepParentChild
+	DepDiscoveredFrom    = types.DepDiscoveredFrom
+	DepConditionalBlocks = types.DepConditionalBlocks // B runs only if A fails (bd-kzda)
 )
 
 // SortPolicy constants

@@ -4,10 +4,96 @@ package ui
 
 import (
 	"fmt"
+	"image/color"
+	"os"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	lipgloss "charm.land/lipgloss/v2"
+	"github.com/steveyegge/beads/internal/types"
 )
+
+func init() {
+	if !ShouldUseColor() {
+		return // all colors remain NoColor, all styles remain empty
+	}
+	// Detect dark background for adaptive colors.
+	// Only probed when color is enabled (prevents OSC 11 leaks in hook contexts).
+	isDark := lipgloss.HasDarkBackground(os.Stdin, os.Stdout)
+	initColors(isDark)
+	initStyles()
+}
+
+// DisableColors resets all styles to plain text output.
+// Called from hook contexts to prevent ANSI escape sequence leaks.
+func DisableColors() {
+	// Reset all color vars to NoColor
+	ColorPass = lipgloss.NoColor{}
+	ColorWarn = lipgloss.NoColor{}
+	ColorFail = lipgloss.NoColor{}
+	ColorMuted = lipgloss.NoColor{}
+	ColorAccent = lipgloss.NoColor{}
+	ColorStatusOpen = lipgloss.NoColor{}
+	ColorStatusInProgress = lipgloss.NoColor{}
+	ColorStatusClosed = lipgloss.NoColor{}
+	ColorStatusBlocked = lipgloss.NoColor{}
+	ColorStatusPinned = lipgloss.NoColor{}
+	ColorStatusHooked = lipgloss.NoColor{}
+	ColorPriorityP0 = lipgloss.NoColor{}
+	ColorPriorityP1 = lipgloss.NoColor{}
+	ColorPriorityP2 = lipgloss.NoColor{}
+	ColorPriorityP3 = lipgloss.NoColor{}
+	ColorPriorityP4 = lipgloss.NoColor{}
+	ColorTypeBug = lipgloss.NoColor{}
+	ColorTypeFeature = lipgloss.NoColor{}
+	ColorTypeTask = lipgloss.NoColor{}
+	ColorTypeEpic = lipgloss.NoColor{}
+	ColorTypeChore = lipgloss.NoColor{}
+	ColorID = lipgloss.NoColor{}
+
+	// Reset all styles to empty (no ANSI output)
+	PassStyle = lipgloss.NewStyle()
+	WarnStyle = lipgloss.NewStyle()
+	FailStyle = lipgloss.NewStyle()
+	MutedStyle = lipgloss.NewStyle()
+	AccentStyle = lipgloss.NewStyle()
+	IDStyle = lipgloss.NewStyle()
+	StatusOpenStyle = lipgloss.NewStyle()
+	StatusInProgressStyle = lipgloss.NewStyle()
+	StatusClosedStyle = lipgloss.NewStyle()
+	StatusBlockedStyle = lipgloss.NewStyle()
+	StatusPinnedStyle = lipgloss.NewStyle()
+	StatusHookedStyle = lipgloss.NewStyle()
+	PriorityP0Style = lipgloss.NewStyle()
+	PriorityP1Style = lipgloss.NewStyle()
+	PriorityP2Style = lipgloss.NewStyle()
+	PriorityP3Style = lipgloss.NewStyle()
+	PriorityP4Style = lipgloss.NewStyle()
+	TypeBugStyle = lipgloss.NewStyle()
+	TypeFeatureStyle = lipgloss.NewStyle()
+	TypeTaskStyle = lipgloss.NewStyle()
+	TypeEpicStyle = lipgloss.NewStyle()
+	TypeChoreStyle = lipgloss.NewStyle()
+	CategoryStyle = lipgloss.NewStyle()
+	BoldStyle = lipgloss.NewStyle()
+	CommandStyle = lipgloss.NewStyle()
+}
+
+// IsAgentMode returns true if the CLI is running in agent-optimized mode.
+// This is triggered by:
+//   - BD_AGENT_MODE=1 environment variable (explicit)
+//   - CLAUDE_CODE environment variable (auto-detect Claude Code)
+//
+// Agent mode provides ultra-compact output optimized for LLM context windows.
+func IsAgentMode() bool {
+	if os.Getenv("BD_AGENT_MODE") == "1" {
+		return true
+	}
+	// Auto-detect Claude Code environment
+	if os.Getenv("CLAUDE_CODE") != "" {
+		return true
+	}
+	return false
+}
 
 // Ayu theme color palette
 // Dark: https://terminalcolors.com/themes/ayu/dark/
@@ -15,146 +101,163 @@ import (
 // Source: https://github.com/ayu-theme/ayu-colors
 var (
 	// Core semantic colors (Ayu theme - adaptive light/dark)
-	ColorPass = lipgloss.AdaptiveColor{
-		Light: "#86b300", // ayu light bright green
-		Dark:  "#c2d94c", // ayu dark bright green
-	}
-	ColorWarn = lipgloss.AdaptiveColor{
-		Light: "#f2ae49", // ayu light bright yellow
-		Dark:  "#ffb454", // ayu dark bright yellow
-	}
-	ColorFail = lipgloss.AdaptiveColor{
-		Light: "#f07171", // ayu light bright red
-		Dark:  "#f07178", // ayu dark bright red
-	}
-	ColorMuted = lipgloss.AdaptiveColor{
-		Light: "#828c99", // ayu light muted
-		Dark:  "#6c7680", // ayu dark muted
-	}
-	ColorAccent = lipgloss.AdaptiveColor{
-		Light: "#399ee6", // ayu light bright blue
-		Dark:  "#59c2ff", // ayu dark bright blue
-	}
+	ColorPass   color.Color = lipgloss.NoColor{}
+	ColorWarn   color.Color = lipgloss.NoColor{}
+	ColorFail   color.Color = lipgloss.NoColor{}
+	ColorMuted  color.Color = lipgloss.NoColor{}
+	ColorAccent color.Color = lipgloss.NoColor{}
 
 	// === Workflow Status Colors ===
-	// Only actionable states get color - open/closed match standard text
-	ColorStatusOpen = lipgloss.AdaptiveColor{
-		Light: "", // standard text color
-		Dark:  "",
-	}
-	ColorStatusInProgress = lipgloss.AdaptiveColor{
-		Light: "#f2ae49", // yellow - active work, very visible
-		Dark:  "#ffb454",
-	}
-	ColorStatusClosed = lipgloss.AdaptiveColor{
-		Light: "#9099a1", // slightly dimmed - visually shows "done"
-		Dark:  "#8090a0",
-	}
-	ColorStatusBlocked = lipgloss.AdaptiveColor{
-		Light: "#f07171", // red - needs attention
-		Dark:  "#f26d78",
-	}
-	ColorStatusPinned = lipgloss.AdaptiveColor{
-		Light: "#d2a6ff", // purple - special/elevated
-		Dark:  "#d2a6ff",
-	}
+	ColorStatusOpen       color.Color = lipgloss.NoColor{}
+	ColorStatusInProgress color.Color = lipgloss.NoColor{}
+	ColorStatusClosed     color.Color = lipgloss.NoColor{}
+	ColorStatusBlocked    color.Color = lipgloss.NoColor{}
+	ColorStatusPinned     color.Color = lipgloss.NoColor{}
+	ColorStatusHooked     color.Color = lipgloss.NoColor{}
 
 	// === Priority Colors ===
-	// Only P0/P1 get color - P2/P3/P4 match standard text
-	ColorPriorityP0 = lipgloss.AdaptiveColor{
-		Light: "#f07171", // bright red - critical
-		Dark:  "#f07178",
-	}
-	ColorPriorityP1 = lipgloss.AdaptiveColor{
-		Light: "#ff8f40", // orange - high urgency
-		Dark:  "#ff8f40",
-	}
-	ColorPriorityP2 = lipgloss.AdaptiveColor{
-		Light: "", // standard text color
-		Dark:  "",
-	}
-	ColorPriorityP3 = lipgloss.AdaptiveColor{
-		Light: "", // standard text color
-		Dark:  "",
-	}
-	ColorPriorityP4 = lipgloss.AdaptiveColor{
-		Light: "", // standard text color
-		Dark:  "",
-	}
+	ColorPriorityP0 color.Color = lipgloss.NoColor{}
+	ColorPriorityP1 color.Color = lipgloss.NoColor{}
+	ColorPriorityP2 color.Color = lipgloss.NoColor{}
+	ColorPriorityP3 color.Color = lipgloss.NoColor{}
+	ColorPriorityP4 color.Color = lipgloss.NoColor{}
 
 	// === Issue Type Colors ===
-	// Bugs and epics get color - they need attention
-	// All other types use standard text
-	ColorTypeBug = lipgloss.AdaptiveColor{
-		Light: "#f07171", // bright red - bugs are problems
-		Dark:  "#f26d78",
-	}
-	ColorTypeFeature = lipgloss.AdaptiveColor{
-		Light: "", // standard text color
-		Dark:  "",
-	}
-	ColorTypeTask = lipgloss.AdaptiveColor{
-		Light: "", // standard text color
-		Dark:  "",
-	}
-	ColorTypeEpic = lipgloss.AdaptiveColor{
-		Light: "#d2a6ff", // purple - larger scope work
-		Dark:  "#d2a6ff",
-	}
-	ColorTypeChore = lipgloss.AdaptiveColor{
-		Light: "", // standard text color
-		Dark:  "",
-	}
+	ColorTypeBug     color.Color = lipgloss.NoColor{}
+	ColorTypeFeature color.Color = lipgloss.NoColor{}
+	ColorTypeTask    color.Color = lipgloss.NoColor{}
+	ColorTypeEpic    color.Color = lipgloss.NoColor{}
+	ColorTypeChore   color.Color = lipgloss.NoColor{}
+	// Note: Orchestrator-specific types (agent, role, rig) have been removed.
+	// Use labels (gt:agent, gt:role, gt:rig) with custom styling if needed.
 
 	// === Issue ID Color ===
-	// IDs use standard text color - subtle, not attention-grabbing
-	ColorID = lipgloss.AdaptiveColor{
-		Light: "", // standard text color
-		Dark:  "",
-	}
+	ColorID color.Color = lipgloss.NoColor{}
 )
+
+// initColors sets adaptive light/dark color values.
+func initColors(isDark bool) {
+	ld := lipgloss.LightDark(isDark)
+
+	ColorPass = ld(lipgloss.Color("#86b300"), lipgloss.Color("#c2d94c"))
+	ColorWarn = ld(lipgloss.Color("#f2ae49"), lipgloss.Color("#ffb454"))
+	ColorFail = ld(lipgloss.Color("#f07171"), lipgloss.Color("#f07178"))
+	ColorMuted = ld(lipgloss.Color("#828c99"), lipgloss.Color("#6c7680"))
+	ColorAccent = ld(lipgloss.Color("#399ee6"), lipgloss.Color("#59c2ff"))
+
+	// Workflow status colors — empty strings mean standard text color (NoColor)
+	ColorStatusOpen = lipgloss.NoColor{} // standard text
+	ColorStatusInProgress = ld(lipgloss.Color("#f2ae49"), lipgloss.Color("#ffb454"))
+	ColorStatusClosed = ld(lipgloss.Color("#9099a1"), lipgloss.Color("#8090a0"))
+	ColorStatusBlocked = ld(lipgloss.Color("#f07171"), lipgloss.Color("#f26d78"))
+	ColorStatusPinned = ld(lipgloss.Color("#d2a6ff"), lipgloss.Color("#d2a6ff"))
+	ColorStatusHooked = ld(lipgloss.Color("#59c2ff"), lipgloss.Color("#59c2ff"))
+
+	// Priority colors — only P0/P1/P2 get color
+	ColorPriorityP0 = ld(lipgloss.Color("#f07171"), lipgloss.Color("#f07178"))
+	ColorPriorityP1 = ld(lipgloss.Color("#ff8f40"), lipgloss.Color("#ff8f40"))
+	ColorPriorityP2 = ld(lipgloss.Color("#e6b450"), lipgloss.Color("#e6b450"))
+	ColorPriorityP3 = lipgloss.NoColor{} // neutral
+	ColorPriorityP4 = lipgloss.NoColor{} // neutral
+
+	// Issue type colors — only bugs and epics get color
+	ColorTypeBug = ld(lipgloss.Color("#f07171"), lipgloss.Color("#f26d78"))
+	ColorTypeFeature = lipgloss.NoColor{} // standard text
+	ColorTypeTask = lipgloss.NoColor{}    // standard text
+	ColorTypeEpic = ld(lipgloss.Color("#d2a6ff"), lipgloss.Color("#d2a6ff"))
+	ColorTypeChore = lipgloss.NoColor{} // standard text
+
+	ColorID = lipgloss.NoColor{} // standard text
+
+	// Command style - uses adaptive color for subtle contrast
+	CommandStyle = lipgloss.NewStyle().Foreground(
+		ld(lipgloss.Color("#5c6166"), lipgloss.Color("#bfbdb6")),
+	)
+}
 
 // Core styles - consistent across all commands
 var (
-	PassStyle   = lipgloss.NewStyle().Foreground(ColorPass)
-	WarnStyle   = lipgloss.NewStyle().Foreground(ColorWarn)
-	FailStyle   = lipgloss.NewStyle().Foreground(ColorFail)
-	MutedStyle  = lipgloss.NewStyle().Foreground(ColorMuted)
-	AccentStyle = lipgloss.NewStyle().Foreground(ColorAccent)
+	PassStyle   = lipgloss.NewStyle()
+	WarnStyle   = lipgloss.NewStyle()
+	FailStyle   = lipgloss.NewStyle()
+	MutedStyle  = lipgloss.NewStyle()
+	AccentStyle = lipgloss.NewStyle()
 )
 
 // Issue ID style
-var IDStyle = lipgloss.NewStyle().Foreground(ColorID)
+var IDStyle = lipgloss.NewStyle()
 
 // Status styles for workflow states
 var (
-	StatusOpenStyle       = lipgloss.NewStyle().Foreground(ColorStatusOpen)
-	StatusInProgressStyle = lipgloss.NewStyle().Foreground(ColorStatusInProgress)
-	StatusClosedStyle     = lipgloss.NewStyle().Foreground(ColorStatusClosed)
-	StatusBlockedStyle    = lipgloss.NewStyle().Foreground(ColorStatusBlocked)
-	StatusPinnedStyle     = lipgloss.NewStyle().Foreground(ColorStatusPinned)
+	StatusOpenStyle       = lipgloss.NewStyle()
+	StatusInProgressStyle = lipgloss.NewStyle()
+	StatusClosedStyle     = lipgloss.NewStyle()
+	StatusBlockedStyle    = lipgloss.NewStyle()
+	StatusPinnedStyle     = lipgloss.NewStyle()
+	StatusHookedStyle     = lipgloss.NewStyle()
 )
 
 // Priority styles
 var (
+	PriorityP0Style = lipgloss.NewStyle()
+	PriorityP1Style = lipgloss.NewStyle()
+	PriorityP2Style = lipgloss.NewStyle()
+	PriorityP3Style = lipgloss.NewStyle()
+	PriorityP4Style = lipgloss.NewStyle()
+)
+
+// Type styles for issue categories
+var (
+	TypeBugStyle     = lipgloss.NewStyle()
+	TypeFeatureStyle = lipgloss.NewStyle()
+	TypeTaskStyle    = lipgloss.NewStyle()
+	TypeEpicStyle    = lipgloss.NewStyle()
+	TypeChoreStyle   = lipgloss.NewStyle()
+	// Note: Orchestrator-specific type styles (agent, role, rig) have been removed.
+)
+
+// CategoryStyle for section headers - bold with accent color
+var CategoryStyle = lipgloss.NewStyle()
+
+// BoldStyle for emphasis
+var BoldStyle = lipgloss.NewStyle()
+
+// CommandStyle for command names - subtle contrast, not attention-grabbing
+var CommandStyle = lipgloss.NewStyle()
+
+// initStyles sets up styled versions using the current color values.
+func initStyles() {
+	PassStyle = lipgloss.NewStyle().Foreground(ColorPass)
+	WarnStyle = lipgloss.NewStyle().Foreground(ColorWarn)
+	FailStyle = lipgloss.NewStyle().Foreground(ColorFail)
+	MutedStyle = lipgloss.NewStyle().Foreground(ColorMuted)
+	AccentStyle = lipgloss.NewStyle().Foreground(ColorAccent)
+
+	IDStyle = lipgloss.NewStyle().Foreground(ColorID)
+
+	StatusOpenStyle = lipgloss.NewStyle().Foreground(ColorStatusOpen)
+	StatusInProgressStyle = lipgloss.NewStyle().Foreground(ColorStatusInProgress)
+	StatusClosedStyle = lipgloss.NewStyle().Foreground(ColorStatusClosed)
+	StatusBlockedStyle = lipgloss.NewStyle().Foreground(ColorStatusBlocked)
+	StatusPinnedStyle = lipgloss.NewStyle().Foreground(ColorStatusPinned)
+	StatusHookedStyle = lipgloss.NewStyle().Foreground(ColorStatusHooked)
+
 	PriorityP0Style = lipgloss.NewStyle().Foreground(ColorPriorityP0).Bold(true)
 	PriorityP1Style = lipgloss.NewStyle().Foreground(ColorPriorityP1)
 	PriorityP2Style = lipgloss.NewStyle().Foreground(ColorPriorityP2)
 	PriorityP3Style = lipgloss.NewStyle().Foreground(ColorPriorityP3)
 	PriorityP4Style = lipgloss.NewStyle().Foreground(ColorPriorityP4)
-)
 
-// Type styles for issue categories
-var (
-	TypeBugStyle     = lipgloss.NewStyle().Foreground(ColorTypeBug)
+	TypeBugStyle = lipgloss.NewStyle().Foreground(ColorTypeBug)
 	TypeFeatureStyle = lipgloss.NewStyle().Foreground(ColorTypeFeature)
-	TypeTaskStyle    = lipgloss.NewStyle().Foreground(ColorTypeTask)
-	TypeEpicStyle    = lipgloss.NewStyle().Foreground(ColorTypeEpic)
-	TypeChoreStyle   = lipgloss.NewStyle().Foreground(ColorTypeChore)
-)
+	TypeTaskStyle = lipgloss.NewStyle().Foreground(ColorTypeTask)
+	TypeEpicStyle = lipgloss.NewStyle().Foreground(ColorTypeEpic)
+	TypeChoreStyle = lipgloss.NewStyle().Foreground(ColorTypeChore)
 
-// CategoryStyle for section headers - bold with accent color
-var CategoryStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorAccent)
+	CategoryStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorAccent)
+	BoldStyle = lipgloss.NewStyle().Bold(true)
+	// CommandStyle is set in initColors where LightDark is available
+}
 
 // Status icons - consistent semantic indicators
 const (
@@ -164,6 +267,152 @@ const (
 	IconSkip = "-"
 	IconInfo = "ℹ"
 )
+
+// Issue status icons - used consistently across all commands
+// Design principle: icons > text labels for scannability
+// IMPORTANT: Use small Unicode symbols, NOT emoji-style icons (🔴🟠 etc.)
+// Emoji blobs cause cognitive overload and break visual consistency
+const (
+	StatusIconOpen       = "○" // available to work (hollow circle)
+	StatusIconInProgress = "◐" // active work (half-filled)
+	StatusIconBlocked    = "●" // needs attention (filled circle)
+	StatusIconClosed     = "✓" // completed (checkmark)
+	StatusIconDeferred   = "❄" // scheduled for later (snowflake)
+	StatusIconPinned     = "📌" // elevated priority
+	StatusIconCustom     = "◇" // custom/uncategorized status (diamond)
+)
+
+// Priority icon - small filled circle, colored by priority level
+// IMPORTANT: Use this small circle, NOT emoji blobs (🔴🟠🟡🔵⚪)
+const PriorityIcon = "●"
+
+// RenderStatusIcon returns the appropriate icon for a status with semantic coloring.
+// This is the canonical source for status icon rendering - use this everywhere.
+// For custom statuses, call RenderStatusIconWithCategory for category-aware rendering.
+func RenderStatusIcon(status string) string {
+	switch status {
+	case "open":
+		return StatusIconOpen // no color - available but not urgent
+	case "in_progress":
+		return StatusInProgressStyle.Render(StatusIconInProgress)
+	case "blocked":
+		return StatusBlockedStyle.Render(StatusIconBlocked)
+	case "closed":
+		return StatusClosedStyle.Render(StatusIconClosed)
+	case "deferred":
+		return MutedStyle.Render(StatusIconDeferred)
+	case "pinned":
+		return StatusPinnedStyle.Render(StatusIconPinned)
+	default:
+		return StatusIconCustom // custom/unknown status
+	}
+}
+
+// RenderStatusIconWithCategory returns the icon for a status, using category
+// to determine icon/color for custom statuses.
+func RenderStatusIconWithCategory(status string, category types.StatusCategory) string {
+	// Try built-in first
+	switch status {
+	case "open":
+		return StatusIconOpen
+	case "in_progress":
+		return StatusInProgressStyle.Render(StatusIconInProgress)
+	case "blocked":
+		return StatusBlockedStyle.Render(StatusIconBlocked)
+	case "closed":
+		return StatusClosedStyle.Render(StatusIconClosed)
+	case "deferred":
+		return MutedStyle.Render(StatusIconDeferred)
+	case "pinned":
+		return StatusPinnedStyle.Render(StatusIconPinned)
+	}
+	// Custom status — inherit from category
+	switch category {
+	case types.CategoryActive:
+		return StatusIconOpen
+	case types.CategoryWIP:
+		return StatusInProgressStyle.Render(StatusIconInProgress)
+	case types.CategoryDone:
+		return StatusClosedStyle.Render(StatusIconClosed)
+	case types.CategoryFrozen:
+		return MutedStyle.Render(StatusIconDeferred)
+	default:
+		return StatusIconCustom
+	}
+}
+
+// GetStatusIcon returns just the icon character without styling
+// Useful when you need to apply custom styling or for non-TTY output
+func GetStatusIcon(status string) string {
+	switch status {
+	case "open":
+		return StatusIconOpen
+	case "in_progress":
+		return StatusIconInProgress
+	case "blocked":
+		return StatusIconBlocked
+	case "closed":
+		return StatusIconClosed
+	case "deferred":
+		return StatusIconDeferred
+	case "pinned":
+		return StatusIconPinned
+	default:
+		return StatusIconCustom
+	}
+}
+
+// GetStatusIconWithCategory returns the icon character for a status using category fallback.
+func GetStatusIconWithCategory(status string, category types.StatusCategory) string {
+	switch status {
+	case "open":
+		return StatusIconOpen
+	case "in_progress":
+		return StatusIconInProgress
+	case "blocked":
+		return StatusIconBlocked
+	case "closed":
+		return StatusIconClosed
+	case "deferred":
+		return StatusIconDeferred
+	case "pinned":
+		return StatusIconPinned
+	}
+	switch category {
+	case types.CategoryActive:
+		return StatusIconOpen
+	case types.CategoryWIP:
+		return StatusIconInProgress
+	case types.CategoryDone:
+		return StatusIconClosed
+	case types.CategoryFrozen:
+		return StatusIconDeferred
+	default:
+		return StatusIconCustom
+	}
+}
+
+// GetStatusStyle returns the lipgloss style for a given status
+// Use this when you need to apply the semantic color to custom text
+// Example: ui.GetStatusStyle("in_progress").Render(myCustomText)
+func GetStatusStyle(status string) lipgloss.Style {
+	switch status {
+	case "in_progress":
+		return StatusInProgressStyle
+	case "blocked":
+		return StatusBlockedStyle
+	case "closed":
+		return StatusClosedStyle
+	case "deferred":
+		return MutedStyle
+	case "pinned":
+		return StatusPinnedStyle
+	case "hooked":
+		return StatusHookedStyle
+	default: // open and others - no special styling
+		return lipgloss.NewStyle()
+	}
+}
 
 // Tree characters for hierarchical display
 const (
@@ -255,6 +504,8 @@ func RenderStatus(status string) string {
 		return StatusBlockedStyle.Render(status)
 	case "pinned":
 		return StatusPinnedStyle.Render(status)
+	case "hooked":
+		return StatusHookedStyle.Render(status)
 	case "closed":
 		return StatusClosedStyle.Render(status)
 	default: // open and others
@@ -263,8 +514,29 @@ func RenderStatus(status string) string {
 }
 
 // RenderPriority renders a priority level with semantic styling
+// Format: ● P0 (icon + label)
 // P0/P1 get color; P2/P3/P4 use standard text
 func RenderPriority(priority int) string {
+	label := fmt.Sprintf("%s P%d", PriorityIcon, priority)
+	switch priority {
+	case 0:
+		return PriorityP0Style.Render(label)
+	case 1:
+		return PriorityP1Style.Render(label)
+	case 2:
+		return PriorityP2Style.Render(label)
+	case 3:
+		return PriorityP3Style.Render(label)
+	case 4:
+		return PriorityP4Style.Render(label)
+	default:
+		return label
+	}
+}
+
+// RenderPriorityCompact renders just the priority label without icon
+// Use when space is constrained or icon would be redundant
+func RenderPriorityCompact(priority int) string {
 	label := fmt.Sprintf("P%d", priority)
 	switch priority {
 	case 0:
@@ -283,7 +555,8 @@ func RenderPriority(priority int) string {
 }
 
 // RenderType renders an issue type with semantic styling
-// bugs get color; all other types use standard text
+// bugs and epics get color; all other types use standard text
+// Note: Orchestrator-specific types (agent, role, rig) now fall through to default
 func RenderType(issueType string) string {
 	switch issueType {
 	case "bug":
@@ -340,15 +613,6 @@ func RenderTypeForStatus(issueType, status string) string {
 func RenderClosedLine(line string) string {
 	return StatusClosedStyle.Render(line)
 }
-
-// BoldStyle for emphasis
-var BoldStyle = lipgloss.NewStyle().Bold(true)
-
-// CommandStyle for command names - subtle contrast, not attention-grabbing
-var CommandStyle = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{
-	Light: "#5c6166", // slightly darker than standard
-	Dark:  "#bfbdb6", // slightly brighter than standard
-})
 
 // RenderBold renders text in bold
 func RenderBold(s string) string {

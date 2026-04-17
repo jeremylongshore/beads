@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 from .models import (
     AddDependencyParams,
     BlockedIssue,
+    BlockedParams,
+    ClaimIssueParams,
     CloseIssueParams,
     CreateIssueParams,
     DependencyType,
@@ -36,7 +38,7 @@ from .models import (
 # ContextVar for request-scoped workspace routing
 current_workspace: ContextVar[str | None] = ContextVar('workspace', default=None)
 
-# Connection pool for per-project daemon sockets
+# Connection pool for per-project clients
 _connection_pool: dict[str, BdClientBase] = {}
 _pool_lock = asyncio.Lock()
 
@@ -51,57 +53,134 @@ DEFAULT_DEPENDENCY_TYPE: DependencyType = "blocks"
 def _register_client_for_cleanup(client: BdClientBase) -> None:
     """Register client with server cleanup system.
     
-    This ensures daemon connections are properly closed on server shutdown.
+    This ensures client connections are properly closed on server shutdown.
     Import is deferred to avoid circular dependency.
     """
     try:
         from . import server
-        if hasattr(server, '_daemon_clients'):
-            server._daemon_clients.append(client)
+        if hasattr(server, '_registered_clients'):
+            server._registered_clients.append(client)
     except (ImportError, AttributeError):
         # Server module not available or cleanup not initialized - that's ok
         pass
 
 
-def _find_beads_db_in_tree(start_dir: str | None = None) -> str | None:
-    """Walk up directory tree looking for .beads/*.db (matches Go CLI behavior).
-    
-    Args:
-        start_dir: Starting directory (default: current working directory)
-        
-    Returns:
-        Absolute path to workspace root containing .beads/*.db, or None if not found
+def _has_beads_project_files(beads_dir: str) -> bool:
+    """Check if a .beads directory contains actual project files.
+
+    Mirrors hasBeadsProjectFiles in internal/beads/beads.go. Returns True when
+    any of these are present: metadata.json, config.yaml, dolt/, embeddeddolt/,
+    or a non-backup *.db file (excluding vc.db).
     """
     import glob
-    
+
+    if os.path.isfile(os.path.join(beads_dir, "metadata.json")):
+        return True
+    if os.path.isfile(os.path.join(beads_dir, "config.yaml")):
+        return True
+    if os.path.isdir(os.path.join(beads_dir, "dolt")):
+        return True
+    if os.path.isdir(os.path.join(beads_dir, "embeddeddolt")):
+        return True
+
+    for match in glob.glob(os.path.join(beads_dir, "*.db")):
+        base = os.path.basename(match)
+        if ".backup" not in base and base != "vc.db":
+            return True
+
+    return False
+
+
+def _resolve_beads_redirect(beads_dir: str, workspace_root: str) -> str | None:
+    """Follow a .beads/redirect file to the actual beads directory.
+
+    Args:
+        beads_dir: Path to the .beads directory that may contain a redirect
+        workspace_root: The workspace root directory (parent of beads_dir)
+
+    Returns:
+        Resolved workspace root if redirect is valid, None otherwise
+    """
+    redirect_path = os.path.join(beads_dir, "redirect")
+    if not os.path.isfile(redirect_path):
+        return None
+
+    try:
+        with open(redirect_path, 'r') as f:
+            redirect_target = f.read().strip()
+
+        if not redirect_target:
+            return None
+
+        # Resolve relative to workspace_root (the redirect is written from the perspective
+        # of being inside workspace_root, not inside workspace_root/.beads)
+        # e.g., redirect contains "../../mayor/rig/.beads"
+        # from agents/capable/, this resolves to the canonical .beads
+        resolved = os.path.normpath(os.path.join(workspace_root, redirect_target))
+
+        if not os.path.isdir(resolved):
+            logger.debug(f"Redirect target {resolved} does not exist")
+            return None
+
+        # Verify the redirected location has a valid beads project
+        # (SQLite *.db, embedded Dolt, server Dolt, or just metadata/config)
+        if not _has_beads_project_files(resolved):
+            logger.debug(f"Redirect target {resolved} has no valid beads project files")
+            return None
+
+        # Return the workspace root of the redirected location (parent of .beads)
+        return os.path.dirname(resolved)
+
+    except Exception as e:
+        logger.debug(f"Failed to follow redirect: {e}")
+        return None
+
+
+def _find_beads_db_in_tree(start_dir: str | None = None) -> str | None:
+    """Walk up directory tree looking for .beads/*.db (matches Go CLI behavior).
+
+    Also follows .beads/redirect files to shared beads locations, which is
+    essential for agent/worker directories that share a central database.
+
+    Args:
+        start_dir: Starting directory (default: current working directory)
+
+    Returns:
+        Absolute path to workspace root containing a valid .beads project,
+        or None if not found. Detects SQLite (*.db), embedded Dolt
+        (embeddeddolt/), server Dolt (dolt/), and metadata-only projects.
+    """
     try:
         current = os.path.abspath(start_dir or os.getcwd())
-        
+
         # Resolve symlinks like Go CLI does
         try:
             current = os.path.realpath(current)
         except Exception:
             pass
-        
+
         # Walk up directory tree
         while True:
             beads_dir = os.path.join(current, ".beads")
             if os.path.isdir(beads_dir):
-                # Find any .db file in .beads/ (excluding backups)
-                db_files = glob.glob(os.path.join(beads_dir, "*.db"))
-                valid_dbs = [f for f in db_files if ".backup" not in os.path.basename(f)]
-                
-                if valid_dbs:
-                    # Return workspace root (parent of .beads), not the db path
+                # First, check for redirect file (agent/worker directories use this)
+                redirected = _resolve_beads_redirect(beads_dir, current)
+                if redirected:
+                    logger.debug(f"Followed redirect from {current} to {redirected}")
+                    return redirected
+
+                # No redirect — check for any valid beads project files
+                # (matches Go's hasBeadsProjectFiles)
+                if _has_beads_project_files(beads_dir):
                     return current
-            
+
             parent = os.path.dirname(current)
             if parent == current:  # Reached filesystem root
                 break
             current = parent
-        
+
         return None
-        
+
     except Exception as e:
         logger.debug(f"Failed to search for .beads in tree: {e}")
         return None
@@ -140,7 +219,7 @@ def _canonicalize_path(path: str) -> str:
     """Canonicalize workspace path to handle symlinks and git repos.
     
     This ensures that different paths pointing to the same project
-    (e.g., via symlinks) use the same daemon connection.
+    (e.g., via symlinks) use the same client connection.
     
     Args:
         path: Workspace directory path
@@ -157,7 +236,7 @@ def _canonicalize_path(path: str) -> str:
         return real
     
     # 3. Try to find git toplevel
-    # This ensures we connect to the right daemon for the git repo
+    # This ensures we connect to the right client for the git repo
     return _resolve_workspace_root(real)
 
 
@@ -170,7 +249,7 @@ async def _health_check_client(client: BdClientBase) -> bool:
     Returns:
         True if client is healthy, False otherwise
     """
-    # Only health check daemon clients
+    # Only health check clients that support ping
     if not hasattr(client, 'ping'):
         return True
     
@@ -183,24 +262,21 @@ async def _health_check_client(client: BdClientBase) -> bool:
 
 
 async def _reconnect_client(canonical: str, max_retries: int = 3) -> BdClientBase:
-    """Attempt to reconnect to daemon with exponential backoff.
-    
+    """Attempt to reconnect with exponential backoff.
+
     Args:
         canonical: Canonical workspace path
         max_retries: Maximum number of retry attempts (default: 3)
-        
+
     Returns:
         New client instance
-        
+
     Raises:
         BdError: If all reconnection attempts fail
     """
-    use_daemon = os.environ.get("BEADS_USE_DAEMON", "1") == "1"
-    
     for attempt in range(max_retries):
         try:
             client = create_bd_client(
-                prefer_daemon=use_daemon,
                 working_dir=canonical
             )
             
@@ -217,15 +293,15 @@ async def _reconnect_client(canonical: str, max_retries: int = 3) -> BdClientBas
             continue
     
     raise BdError(
-        f"Failed to connect to daemon after {max_retries} attempts. "
-        "The daemon may be stopped or unresponsive."
+        f"Failed to connect after {max_retries} attempts. "
+        "The bd client may be misconfigured or unresponsive."
     )
 
 
 async def _get_client() -> BdClientBase:
     """Get a BdClient instance for the current workspace.
     
-    Uses connection pool to manage per-project daemon sockets.
+    Uses connection pool to manage per-project clients.
     Workspace is auto-detected using the same logic as CLI:
     1. current_workspace ContextVar (from workspace_root parameter)
     2. BEADS_WORKING_DIR environment variable
@@ -235,7 +311,7 @@ async def _get_client() -> BdClientBase:
     On failure, drops from pool and attempts reconnection with exponential backoff.
     
     Performs version check on first connection to each workspace.
-    Uses daemon client if available, falls back to CLI client.
+    Uses CLI client for all operations.
 
     Returns:
         Configured BdClientBase instance for the current workspace
@@ -279,10 +355,7 @@ async def _get_client() -> BdClientBase:
                 _connection_pool[canonical] = client
         else:
             # Create new client for this workspace
-            use_daemon = os.environ.get("BEADS_USE_DAEMON", "1") == "1"
-            
             client = create_bd_client(
-                prefer_daemon=use_daemon,
                 working_dir=canonical
             )
             
@@ -304,34 +377,40 @@ async def _get_client() -> BdClientBase:
 async def beads_ready_work(
     limit: Annotated[int, "Maximum number of issues to return (1-100)"] = 10,
     priority: Annotated[int | None, "Filter by priority (0-4, 0=highest)"] = None,
+    issue_type: Annotated[IssueType | None, "Filter by type (task, bug, feature, epic, chore, decision, merge-request, or custom)"] = None,
     assignee: Annotated[str | None, "Filter by assignee"] = None,
     labels: Annotated[list[str] | None, "Filter by labels (AND: must have ALL)"] = None,
     labels_any: Annotated[list[str] | None, "Filter by labels (OR: must have at least one)"] = None,
     unassigned: Annotated[bool, "Filter to only unassigned issues"] = False,
     sort_policy: Annotated[str | None, "Sort policy: hybrid (default), priority, oldest"] = None,
+    parent: Annotated[str | None, "Filter to descendants of this bead/epic"] = None,
 ) -> list[Issue]:
     """Find issues with no blocking dependencies that are ready to work on.
 
     Ready work = status is 'open' AND no blocking dependencies.
     Perfect for agents to claim next work!
+
+    Use 'parent' to filter to all descendants of an epic/bead.
     """
     client = await _get_client()
     params = ReadyWorkParams(
         limit=limit,
         priority=priority,
+        issue_type=issue_type,
         assignee=assignee,
         labels=labels,
         labels_any=labels_any,
         unassigned=unassigned,
         sort_policy=sort_policy,
+        parent_id=parent,
     )
     return await client.ready(params)
 
 
 async def beads_list_issues(
-    status: Annotated[IssueStatus | None, "Filter by status (open, in_progress, blocked, deferred, closed)"] = None,
+    status: Annotated[IssueStatus | None, "Filter by status (open, in_progress, blocked, deferred, closed, or custom)"] = None,
     priority: Annotated[int | None, "Filter by priority (0-4, 0=highest)"] = None,
-    issue_type: Annotated[IssueType | None, "Filter by type (bug, feature, task, epic, chore)"] = None,
+    issue_type: Annotated[IssueType | None, "Filter by type (bug, feature, task, epic, chore, decision, or custom)"] = None,
     assignee: Annotated[str | None, "Filter by assignee"] = None,
     labels: Annotated[list[str] | None, "Filter by labels (AND: must have ALL)"] = None,
     labels_any: Annotated[list[str] | None, "Filter by labels (OR: must have at least one)"] = None,
@@ -375,7 +454,7 @@ async def beads_create_issue(
     acceptance: Annotated[str | None, "Acceptance criteria"] = None,
     external_ref: Annotated[str | None, "External reference (e.g., gh-9, jira-ABC)"] = None,
     priority: Annotated[int, "Priority (0-4, 0=highest)"] = 2,
-    issue_type: Annotated[IssueType, "Type: bug, feature, task, epic, or chore"] = DEFAULT_ISSUE_TYPE,
+    issue_type: Annotated[IssueType, "Type: bug, feature, task, epic, chore, decision, or custom"] = DEFAULT_ISSUE_TYPE,
     assignee: Annotated[str | None, "Assignee username"] = None,
     labels: Annotated[list[str] | None, "List of labels"] = None,
     id: Annotated[str | None, "Explicit issue ID (e.g., bd-42)"] = None,
@@ -412,7 +491,7 @@ async def beads_create_issue(
 
 async def beads_update_issue(
     issue_id: Annotated[str, "Issue ID (e.g., bd-1)"],
-    status: Annotated[IssueStatus | None, "New status (open, in_progress, blocked, deferred, closed)"] = None,
+    status: Annotated[IssueStatus | None, "New status (open, in_progress, blocked, deferred, closed, or custom)"] = None,
     priority: Annotated[int | None, "New priority (0-4)"] = None,
     assignee: Annotated[str | None, "New assignee"] = None,
     title: Annotated[str | None, "New title"] = None,
@@ -424,8 +503,6 @@ async def beads_update_issue(
 ) -> Issue | list[Issue]:
     """Update an existing issue.
 
-    Claim work by setting status to 'in_progress'.
-    
     Note: Setting status to 'closed' or 'open' will automatically route to
     beads_close_issue() or beads_reopen_issue() respectively to ensure
     proper approval workflows are followed.
@@ -456,6 +533,19 @@ async def beads_update_issue(
         external_ref=external_ref,
     )
     return await client.update(params)
+
+
+async def beads_claim_issue(
+    issue_id: Annotated[str, "Issue ID (e.g., bd-1)"],
+) -> Issue:
+    """Atomically claim an issue for work.
+
+    Uses `bd update <id> --claim` semantics: sets assignee + in_progress in one
+    compare-and-swap operation and fails if already claimed.
+    """
+    client = await _get_client()
+    params = ClaimIssueParams(issue_id=issue_id)
+    return await client.claim(params)
 
 
 async def beads_close_issue(
@@ -490,16 +580,21 @@ async def beads_add_dependency(
     depends_on_id: Annotated[str, "Issue that issue_id depends on (e.g., bd-1)"],
     dep_type: Annotated[
         DependencyType,
-        "Dependency type: blocks, related, parent-child, or discovered-from",
+        "Dependency type. Common: blocks, related, parent-child, discovered-from. "
+        "Full set validated by bd CLI (see internal/types/types.go).",
     ] = DEFAULT_DEPENDENCY_TYPE,
 ) -> str:
     """Add a dependency relationship between two issues.
 
-    Types:
+    Common types:
     - blocks: depends_on_id must complete before issue_id can start
     - related: Soft connection, doesn't block progress
     - parent-child: Epic/subtask hierarchical relationship
     - discovered-from: Track that issue_id was discovered while working on depends_on_id
+
+    Other supported types include relates-to, replies-to, duplicates, supersedes,
+    caused-by, validates, and more. The bd CLI is the source of truth for the
+    full list — see internal/types/types.go.
 
     Use 'discovered-from' when you find new work during your session.
     """
@@ -535,13 +630,18 @@ async def beads_stats() -> Stats:
     return await client.stats()
 
 
-async def beads_blocked() -> list[BlockedIssue]:
+async def beads_blocked(
+    parent: Annotated[str | None, "Filter to descendants of this bead/epic"] = None,
+) -> list[BlockedIssue]:
     """Get blocked issues.
 
     Returns issues that have blocking dependencies, showing what blocks them.
+
+    Use 'parent' to filter to all descendants of an epic/bead.
     """
     client = await _get_client()
-    return await client.blocked()
+    params = BlockedParams(parent_id=parent)
+    return await client.blocked(params)
 
 
 async def beads_inspect_migration() -> dict[str, Any]:

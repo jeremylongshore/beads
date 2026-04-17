@@ -2,1418 +2,441 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
-	"slices"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/hooks"
-	"github.com/steveyegge/beads/internal/rpc"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
-	"github.com/steveyegge/beads/internal/utils"
-	"github.com/steveyegge/beads/internal/validation"
 )
 
 var showCmd = &cobra.Command{
-	Use:     "show [id...]",
+	Use:     "show [id...] [--id=<id>...] [--current]",
+	Aliases: []string{"view"},
 	GroupID: "issues",
 	Short:   "Show issue details",
-	Args:    cobra.MinimumNArgs(1),
+	Args:    cobra.ArbitraryArgs, // Allow zero positional args when --id is used
 	Run: func(cmd *cobra.Command, args []string) {
-		jsonOutput, _ := cmd.Flags().GetBool("json")
 		showThread, _ := cmd.Flags().GetBool("thread")
+		shortMode, _ := cmd.Flags().GetBool("short")
+		longMode, _ := cmd.Flags().GetBool("long")
+		showRefs, _ := cmd.Flags().GetBool("refs")
+		showChildren, _ := cmd.Flags().GetBool("children")
+		asOfRef, _ := cmd.Flags().GetString("as-of")
+		idFlags, _ := cmd.Flags().GetStringArray("id")
+		localTime, _ := cmd.Flags().GetBool("local-time")
+		watchMode, _ := cmd.Flags().GetBool("watch")
+		currentMode, _ := cmd.Flags().GetBool("current")
 		ctx := rootCtx
 
-		// Check database freshness before reading (bd-2q6d, bd-c4rq)
-		// Skip check when using daemon (daemon auto-imports on staleness)
-		if daemonClient == nil {
-			if err := ensureDatabaseFresh(ctx); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+		// Helper to format timestamp based on --local-time flag
+		formatTime := func(t time.Time) string {
+			if localTime {
+				t = t.Local()
 			}
+			return t.Format("2006-01-02 15:04")
 		}
 
-		// Resolve partial IDs first
-		var resolvedIDs []string
-		if daemonClient != nil {
-			// In daemon mode, resolve via RPC
-			for _, id := range args {
-				resolveArgs := &rpc.ResolveIDArgs{ID: id}
-				resp, err := daemonClient.ResolveID(resolveArgs)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error resolving ID %s: %v\n", id, err)
-					os.Exit(1)
-				}
-				var resolvedID string
-				if err := json.Unmarshal(resp.Data, &resolvedID); err != nil {
-					fmt.Fprintf(os.Stderr, "Error unmarshaling resolved ID: %v\n", err)
-					os.Exit(1)
-				}
-				resolvedIDs = append(resolvedIDs, resolvedID)
+		// Merge --id flag values with positional args
+		// This allows IDs that look like flags (e.g., --xyz or gt--abc) to be passed safely
+		args = append(args, idFlags...)
+
+		// Handle --current: resolve the active issue (GH#2184)
+		if currentMode {
+			if len(args) > 0 {
+				FatalErrorRespectJSON("--current cannot be combined with explicit issue IDs")
 			}
-		} else {
-			// In direct mode, resolve via storage
-			var err error
-			resolvedIDs, err = utils.ResolvePartialIDs(ctx, store, args)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+			currentID := resolveCurrentIssueID(ctx)
+			if currentID == "" {
+				FatalErrorRespectJSON("no current issue found (no in-progress, hooked, or recently touched issues)")
 			}
+			args = []string{currentID}
 		}
+
+		// Validate that at least one ID is provided
+		if len(args) == 0 {
+			FatalErrorRespectJSON("at least one issue ID is required (use positional args, --id flag, or --current)")
+		}
+
+		// Handle --as-of flag: show issue at a specific point in history
+		if asOfRef != "" {
+			showIssueAsOf(ctx, args, asOfRef, shortMode)
+			return
+		}
+
+		// Handle --watch mode (GH#654)
+		// Watch mode requires direct store access for file watching
+		if watchMode {
+			if err := ensureDirectMode("watch mode requires direct database access"); err != nil {
+				FatalErrorRespectJSON("%v", err)
+			}
+			if len(args) != 1 {
+				FatalErrorRespectJSON("watch mode requires exactly one issue ID")
+			}
+			watchIssue(ctx, args[0])
+			return
+		}
+
+		// Note: Direct mode uses resolveAndGetIssueWithRouting for prefix-based routing
 
 		// Handle --thread flag: show full conversation thread
-		if showThread && len(resolvedIDs) > 0 {
-			showMessageThread(ctx, resolvedIDs[0], jsonOutput)
+		if showThread {
+			if len(args) > 0 {
+				// Direct mode - resolve first arg with routing
+				result, err := resolveAndGetIssueWithRouting(ctx, store, args[0])
+				if result != nil {
+					defer result.Close()
+				}
+				if err == nil && result != nil && result.ResolvedID != "" {
+					showMessageThread(ctx, result.ResolvedID, jsonOutput)
+					return
+				}
+			}
+		}
+
+		// Handle --refs flag: show issues that reference this issue
+		if showRefs {
+			showIssueRefs(ctx, args, jsonOutput)
 			return
 		}
 
-		// If daemon is running, use RPC
-		if daemonClient != nil {
-			allDetails := []interface{}{}
-			for idx, id := range resolvedIDs {
-				showArgs := &rpc.ShowArgs{ID: id}
-				resp, err := daemonClient.Show(showArgs)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error fetching %s: %v\n", id, err)
-					continue
-				}
-
-				if jsonOutput {
-					type IssueDetails struct {
-						types.Issue
-						Labels       []string                             `json:"labels,omitempty"`
-						Dependencies []*types.IssueWithDependencyMetadata `json:"dependencies,omitempty"`
-						Dependents   []*types.IssueWithDependencyMetadata `json:"dependents,omitempty"`
-					}
-					var details IssueDetails
-					if err := json.Unmarshal(resp.Data, &details); err == nil {
-						allDetails = append(allDetails, details)
-					}
-				} else {
-					// Check if issue exists (daemon returns null for non-existent issues)
-					if string(resp.Data) == "null" || len(resp.Data) == 0 {
-						fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
-						continue
-					}
-					if idx > 0 {
-						fmt.Println("\n" + strings.Repeat("─", 60))
-					}
-
-					// Parse response and use existing formatting code
-					type IssueDetails struct {
-						types.Issue
-						Labels       []string                             `json:"labels,omitempty"`
-						Dependencies []*types.IssueWithDependencyMetadata `json:"dependencies,omitempty"`
-						Dependents   []*types.IssueWithDependencyMetadata `json:"dependents,omitempty"`
-					}
-					var details IssueDetails
-					if err := json.Unmarshal(resp.Data, &details); err != nil {
-						fmt.Fprintf(os.Stderr, "Error parsing response: %v\n", err)
-						os.Exit(1)
-					}
-					issue := &details.Issue
-
-					// Format output (same as direct mode below)
-					tierEmoji := ""
-					statusSuffix := ""
-					switch issue.CompactionLevel {
-					case 1:
-						tierEmoji = " 🗜️"
-						statusSuffix = " (compacted L1)"
-					case 2:
-						tierEmoji = " 📦"
-						statusSuffix = " (compacted L2)"
-					}
-
-					fmt.Printf("\n%s: %s%s\n", ui.RenderAccent(issue.ID), issue.Title, tierEmoji)
-					fmt.Printf("Status: %s%s\n", issue.Status, statusSuffix)
-					if issue.CloseReason != "" {
-						fmt.Printf("Close reason: %s\n", issue.CloseReason)
-					}
-					fmt.Printf("Priority: P%d\n", issue.Priority)
-					fmt.Printf("Type: %s\n", issue.IssueType)
-					if issue.Assignee != "" {
-						fmt.Printf("Assignee: %s\n", issue.Assignee)
-					}
-					if issue.EstimatedMinutes != nil {
-						fmt.Printf("Estimated: %d minutes\n", *issue.EstimatedMinutes)
-					}
-					fmt.Printf("Created: %s\n", issue.CreatedAt.Format("2006-01-02 15:04"))
-					fmt.Printf("Updated: %s\n", issue.UpdatedAt.Format("2006-01-02 15:04"))
-
-					// Show compaction status
-					if issue.CompactionLevel > 0 {
-						fmt.Println()
-						if issue.OriginalSize > 0 {
-							currentSize := len(issue.Description) + len(issue.Design) + len(issue.Notes) + len(issue.AcceptanceCriteria)
-							saved := issue.OriginalSize - currentSize
-							if saved > 0 {
-								reduction := float64(saved) / float64(issue.OriginalSize) * 100
-								fmt.Printf("📊 Original: %d bytes | Compressed: %d bytes (%.0f%% reduction)\n",
-									issue.OriginalSize, currentSize, reduction)
-							}
-						}
-						tierEmoji2 := "🗜️"
-						if issue.CompactionLevel == 2 {
-							tierEmoji2 = "📦"
-						}
-						compactedDate := ""
-						if issue.CompactedAt != nil {
-							compactedDate = issue.CompactedAt.Format("2006-01-02")
-						}
-						fmt.Printf("%s Compacted: %s (Tier %d)\n", tierEmoji2, compactedDate, issue.CompactionLevel)
-					}
-
-					if issue.Description != "" {
-						fmt.Printf("\nDescription:\n%s\n", issue.Description)
-					}
-					if issue.Design != "" {
-						fmt.Printf("\nDesign:\n%s\n", issue.Design)
-					}
-					if issue.Notes != "" {
-						fmt.Printf("\nNotes:\n%s\n", issue.Notes)
-					}
-					if issue.AcceptanceCriteria != "" {
-						fmt.Printf("\nAcceptance Criteria:\n%s\n", issue.AcceptanceCriteria)
-					}
-
-					if len(details.Labels) > 0 {
-						fmt.Printf("\nLabels: %v\n", details.Labels)
-					}
-
-					if len(details.Dependencies) > 0 {
-						fmt.Printf("\nDepends on (%d):\n", len(details.Dependencies))
-						for _, dep := range details.Dependencies {
-							fmt.Printf("  → %s: %s [P%d]\n", dep.ID, dep.Title, dep.Priority)
-						}
-					}
-
-					if len(details.Dependents) > 0 {
-						// Group by dependency type for clarity
-						var blocks, children, related, discovered []*types.IssueWithDependencyMetadata
-						for _, dep := range details.Dependents {
-							switch dep.DependencyType {
-							case types.DepBlocks:
-								blocks = append(blocks, dep)
-							case types.DepParentChild:
-								children = append(children, dep)
-							case types.DepRelated:
-								related = append(related, dep)
-							case types.DepDiscoveredFrom:
-								discovered = append(discovered, dep)
-							default:
-								blocks = append(blocks, dep)
-							}
-						}
-
-						if len(children) > 0 {
-							fmt.Printf("\nChildren (%d):\n", len(children))
-							for _, dep := range children {
-								fmt.Printf("  ↳ %s: %s [P%d - %s]\n", dep.ID, dep.Title, dep.Priority, dep.Status)
-							}
-						}
-						if len(blocks) > 0 {
-							fmt.Printf("\nBlocks (%d):\n", len(blocks))
-							for _, dep := range blocks {
-								fmt.Printf("  ← %s: %s [P%d - %s]\n", dep.ID, dep.Title, dep.Priority, dep.Status)
-							}
-						}
-						if len(related) > 0 {
-							fmt.Printf("\nRelated (%d):\n", len(related))
-							for _, dep := range related {
-								fmt.Printf("  ↔ %s: %s [P%d - %s]\n", dep.ID, dep.Title, dep.Priority, dep.Status)
-							}
-						}
-						if len(discovered) > 0 {
-							fmt.Printf("\nDiscovered (%d):\n", len(discovered))
-							for _, dep := range discovered {
-								fmt.Printf("  ◊ %s: %s [P%d - %s]\n", dep.ID, dep.Title, dep.Priority, dep.Status)
-							}
-						}
-					}
-
-					fmt.Println()
-				}
-			}
-
-			if jsonOutput && len(allDetails) > 0 {
-				outputJSON(allDetails)
-			}
+		// Handle --children flag: show only children of this issue
+		if showChildren {
+			showIssueChildren(ctx, args, jsonOutput, shortMode)
 			return
 		}
 
-		// Direct mode
+		// Direct mode - use routed resolution for cross-repo lookups
 		allDetails := []interface{}{}
-		for idx, id := range resolvedIDs {
-			issue, err := store.GetIssue(ctx, id)
+		foundCount := 0
+		for idx, id := range args {
+			// Resolve and get issue with routing (e.g., gt-xyz routes to another rig)
+			result, err := resolveAndGetIssueWithRouting(ctx, store, id)
 			if err != nil {
+				if result != nil {
+					result.Close()
+				}
 				fmt.Fprintf(os.Stderr, "Error fetching %s: %v\n", id, err)
 				continue
 			}
-			if issue == nil {
+			if result == nil || result.Issue == nil {
+				if result != nil {
+					result.Close()
+				}
 				fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
+				continue
+			}
+			issue := result.Issue
+			issueStore := result.Store // Use the store that contains this issue
+			// Note: result.Close() called at end of loop iteration
+			foundCount++
+
+			if shortMode {
+				fmt.Println(formatShortIssue(issue))
+				result.Close()
 				continue
 			}
 
 			if jsonOutput {
 				// Include labels, dependencies (with metadata), dependents (with metadata), and comments in JSON output
-				type IssueDetails struct {
-					*types.Issue
-					Labels       []string                             `json:"labels,omitempty"`
-					Dependencies []*types.IssueWithDependencyMetadata `json:"dependencies,omitempty"`
-					Dependents   []*types.IssueWithDependencyMetadata `json:"dependents,omitempty"`
-					Comments     []*types.Comment                     `json:"comments,omitempty"`
-				}
-				details := &IssueDetails{Issue: issue}
-				details.Labels, _ = store.GetLabels(ctx, issue.ID)
+				details := &types.IssueDetails{Issue: *issue}
+				details.Labels, _ = issueStore.GetLabels(ctx, issue.ID) // Best effort: show issue even if label fetch fails
 
 				// Get dependencies with metadata (dependency_type field)
-				if sqliteStore, ok := store.(*sqlite.SQLiteStorage); ok {
-					details.Dependencies, _ = sqliteStore.GetDependenciesWithMetadata(ctx, issue.ID)
-					details.Dependents, _ = sqliteStore.GetDependentsWithMetadata(ctx, issue.ID)
-				} else {
-					// Fallback to regular methods without metadata for other storage backends
-					deps, _ := store.GetDependencies(ctx, issue.ID)
-					for _, dep := range deps {
-						details.Dependencies = append(details.Dependencies, &types.IssueWithDependencyMetadata{Issue: *dep})
+				details.Dependencies, _ = issueStore.GetDependenciesWithMetadata(ctx, issue.ID) // Best effort: show issue even if deps unavailable
+				details.Dependents, _ = issueStore.GetDependentsWithMetadata(ctx, issue.ID)     // Best effort: show issue even if dependents unavailable
+
+				details.Comments, _ = issueStore.GetIssueComments(ctx, issue.ID) // Best effort: show issue even if comments unavailable
+
+				// Epic progress: count children status for epic issues
+				if issue.IssueType == types.TypeEpic && details.Dependents != nil {
+					total, closed := 0, 0
+					for _, dep := range details.Dependents {
+						if dep.DependencyType == types.DepParentChild {
+							total++
+							if dep.Issue.Status == types.StatusClosed {
+								closed++
+							}
+						}
 					}
-					dependents, _ := store.GetDependents(ctx, issue.ID)
-					for _, dependent := range dependents {
-						details.Dependents = append(details.Dependents, &types.IssueWithDependencyMetadata{Issue: *dependent})
+					if total > 0 {
+						details.EpicTotalChildren = &total
+						details.EpicClosedChildren = &closed
+						closeable := total == closed
+						details.EpicCloseable = &closeable
 					}
 				}
 
-				details.Comments, _ = store.GetIssueComments(ctx, issue.ID)
+				// Compute parent from dependencies
+				for _, dep := range details.Dependencies {
+					if dep.DependencyType == types.DepParentChild {
+						details.Parent = &dep.ID
+						break
+					}
+				}
 				allDetails = append(allDetails, details)
+				result.Close() // Close before continuing to next iteration
 				continue
 			}
-
 			if idx > 0 {
-				fmt.Println("\n" + strings.Repeat("─", 60))
+				fmt.Println("\n" + ui.RenderMuted(strings.Repeat("─", 60)))
+				fmt.Printf("\n%s\n", formatIssueHeader(issue))
+			} else {
+				fmt.Printf("%s\n", formatIssueHeader(issue))
 			}
 
-			// Add compaction emoji to title line
-			tierEmoji := ""
-			statusSuffix := ""
-			switch issue.CompactionLevel {
-			case 1:
-				tierEmoji = " 🗜️"
-				statusSuffix = " (compacted L1)"
-			case 2:
-				tierEmoji = " 📦"
-				statusSuffix = " (compacted L2)"
-			}
+			// Metadata: Owner · Type | Created · Updated
+			fmt.Println(formatIssueMetadata(issue))
 
-			fmt.Printf("\n%s: %s%s\n", ui.RenderAccent(issue.ID), issue.Title, tierEmoji)
-			fmt.Printf("Status: %s%s\n", issue.Status, statusSuffix)
-			if issue.CloseReason != "" {
-				fmt.Printf("Close reason: %s\n", issue.CloseReason)
-			}
-			fmt.Printf("Priority: P%d\n", issue.Priority)
-			fmt.Printf("Type: %s\n", issue.IssueType)
-			if issue.Assignee != "" {
-				fmt.Printf("Assignee: %s\n", issue.Assignee)
-			}
-			if issue.EstimatedMinutes != nil {
-				fmt.Printf("Estimated: %d minutes\n", *issue.EstimatedMinutes)
-			}
-			fmt.Printf("Created: %s\n", issue.CreatedAt.Format("2006-01-02 15:04"))
-			fmt.Printf("Updated: %s\n", issue.UpdatedAt.Format("2006-01-02 15:04"))
-
-			// Show compaction status footer
+			// Compaction info (if applicable)
 			if issue.CompactionLevel > 0 {
-				tierEmoji := "🗜️"
-				if issue.CompactionLevel == 2 {
-					tierEmoji = "📦"
-				}
-				tierName := fmt.Sprintf("Tier %d", issue.CompactionLevel)
-
 				fmt.Println()
 				if issue.OriginalSize > 0 {
 					currentSize := len(issue.Description) + len(issue.Design) + len(issue.Notes) + len(issue.AcceptanceCriteria)
 					saved := issue.OriginalSize - currentSize
 					if saved > 0 {
 						reduction := float64(saved) / float64(issue.OriginalSize) * 100
-						fmt.Printf("📊 Original: %d bytes | Compressed: %d bytes (%.0f%% reduction)\n",
+						fmt.Printf("📊 %d → %d bytes (%.0f%% reduction)\n",
 							issue.OriginalSize, currentSize, reduction)
 					}
 				}
-				compactedDate := ""
-				if issue.CompactedAt != nil {
-					compactedDate = issue.CompactedAt.Format("2006-01-02")
-				}
-				fmt.Printf("%s Compacted: %s (%s)\n", tierEmoji, compactedDate, tierName)
 			}
 
+			// Content sections
 			if issue.Description != "" {
-				fmt.Printf("\nDescription:\n%s\n", issue.Description)
+				fmt.Printf("\n%s\n%s\n", ui.RenderBold("DESCRIPTION"), ui.RenderMarkdown(issue.Description))
 			}
 			if issue.Design != "" {
-				fmt.Printf("\nDesign:\n%s\n", issue.Design)
+				fmt.Printf("\n%s\n%s\n", ui.RenderBold("DESIGN"), ui.RenderMarkdown(issue.Design))
 			}
 			if issue.Notes != "" {
-				fmt.Printf("\nNotes:\n%s\n", issue.Notes)
+				fmt.Printf("\n%s\n%s\n", ui.RenderBold("NOTES"), ui.RenderMarkdown(issue.Notes))
 			}
 			if issue.AcceptanceCriteria != "" {
-				fmt.Printf("\nAcceptance Criteria:\n%s\n", issue.AcceptanceCriteria)
+				fmt.Printf("\n%s\n%s\n", ui.RenderBold("ACCEPTANCE CRITERIA"), ui.RenderMarkdown(issue.AcceptanceCriteria))
 			}
 
 			// Show labels
-			labels, _ := store.GetLabels(ctx, issue.ID)
+			labels, _ := issueStore.GetLabels(ctx, issue.ID) // Best effort: show issue even if label fetch fails
 			if len(labels) > 0 {
-				fmt.Printf("\nLabels: %v\n", labels)
+				fmt.Printf("\n%s %s\n", ui.RenderBold("LABELS:"), strings.Join(labels, ", "))
 			}
 
-			// Show dependencies
-			deps, _ := store.GetDependencies(ctx, issue.ID)
-			if len(deps) > 0 {
-				fmt.Printf("\nDepends on (%d):\n", len(deps))
-				for _, dep := range deps {
-					fmt.Printf("  → %s: %s [P%d]\n", dep.ID, dep.Title, dep.Priority)
+			// Show custom metadata (GH#1406)
+			if metaStr := formatIssueCustomMetadata(issue); metaStr != "" {
+				fmt.Printf("\n%s\n", metaStr)
+			}
+
+			// Collect related issues from both directions for deduplication
+			// (relates-to is bidirectional, so we merge and show once)
+			relatedSeen := make(map[string]*types.IssueWithDependencyMetadata)
+
+			// Show dependencies - grouped by dependency type for clarity
+			depsWithMeta, _ := issueStore.GetDependenciesWithMetadata(ctx, issue.ID) // Best effort: show issue even if deps unavailable
+
+			if len(depsWithMeta) > 0 {
+				// Group by dependency type
+				var blocks, parent, discovered []*types.IssueWithDependencyMetadata
+				for _, dep := range depsWithMeta {
+					switch dep.DependencyType {
+					case types.DepBlocks:
+						blocks = append(blocks, dep)
+					case types.DepParentChild:
+						parent = append(parent, dep)
+					case types.DepRelated, types.DepRelatesTo:
+						relatedSeen[dep.ID] = dep
+					case types.DepDiscoveredFrom:
+						discovered = append(discovered, dep)
+					default:
+						blocks = append(blocks, dep) // Default to blocks
+					}
+				}
+
+				if len(parent) > 0 {
+					fmt.Printf("\n%s\n", ui.RenderBold("PARENT"))
+					for _, dep := range parent {
+						fmt.Println(formatDependencyLine("↑", dep))
+					}
+				}
+				if len(blocks) > 0 {
+					fmt.Printf("\n%s\n", ui.RenderBold("DEPENDS ON"))
+					for _, dep := range blocks {
+						fmt.Println(formatDependencyLine("→", dep))
+					}
+				}
+				if len(discovered) > 0 {
+					fmt.Printf("\n%s\n", ui.RenderBold("DISCOVERED FROM"))
+					for _, dep := range discovered {
+						fmt.Println(formatDependencyLine("◊", dep))
+					}
 				}
 			}
 
 			// Show dependents - grouped by dependency type for clarity
-			// Use GetDependentsWithMetadata to get the dependency type
-			sqliteStore, ok := store.(*sqlite.SQLiteStorage)
-			if ok {
-				dependentsWithMeta, _ := sqliteStore.GetDependentsWithMetadata(ctx, issue.ID)
-				if len(dependentsWithMeta) > 0 {
-					// Group by dependency type
-					var blocks, children, related, discovered []*types.IssueWithDependencyMetadata
-					for _, dep := range dependentsWithMeta {
-						switch dep.DependencyType {
-						case types.DepBlocks:
-							blocks = append(blocks, dep)
-						case types.DepParentChild:
-							children = append(children, dep)
-						case types.DepRelated:
-							related = append(related, dep)
-						case types.DepDiscoveredFrom:
-							discovered = append(discovered, dep)
-						default:
-							blocks = append(blocks, dep) // Default to blocks
-						}
+			dependentsWithMeta, _ := issueStore.GetDependentsWithMetadata(ctx, issue.ID) // Best effort: show issue even if dependents unavailable
+			if len(dependentsWithMeta) > 0 {
+				// Group by dependency type
+				var blocks, children, discovered []*types.IssueWithDependencyMetadata
+				for _, dep := range dependentsWithMeta {
+					switch dep.DependencyType {
+					case types.DepBlocks:
+						blocks = append(blocks, dep)
+					case types.DepParentChild:
+						children = append(children, dep)
+					case types.DepRelated, types.DepRelatesTo:
+						relatedSeen[dep.ID] = dep
+					case types.DepDiscoveredFrom:
+						discovered = append(discovered, dep)
+					default:
+						blocks = append(blocks, dep) // Default to blocks
 					}
+				}
 
-					if len(children) > 0 {
-						fmt.Printf("\nChildren (%d):\n", len(children))
+				if len(children) > 0 {
+					fmt.Printf("\n%s\n", ui.RenderBold("CHILDREN"))
+					for _, dep := range children {
+						fmt.Println(formatDependencyLine("↳", dep))
+					}
+					// Epic progress summary
+					if issue.IssueType == types.TypeEpic {
+						closedCount := 0
 						for _, dep := range children {
-							fmt.Printf("  ↳ %s: %s [P%d - %s]\n", dep.ID, dep.Title, dep.Priority, dep.Status)
+							if dep.Issue.Status == types.StatusClosed {
+								closedCount++
+							}
 						}
-					}
-					if len(blocks) > 0 {
-						fmt.Printf("\nBlocks (%d):\n", len(blocks))
-						for _, dep := range blocks {
-							fmt.Printf("  ← %s: %s [P%d - %s]\n", dep.ID, dep.Title, dep.Priority, dep.Status)
+						pct := 0
+						if len(children) > 0 {
+							pct = (closedCount * 100) / len(children)
 						}
-					}
-					if len(related) > 0 {
-						fmt.Printf("\nRelated (%d):\n", len(related))
-						for _, dep := range related {
-							fmt.Printf("  ↔ %s: %s [P%d - %s]\n", dep.ID, dep.Title, dep.Priority, dep.Status)
-						}
-					}
-					if len(discovered) > 0 {
-						fmt.Printf("\nDiscovered (%d):\n", len(discovered))
-						for _, dep := range discovered {
-							fmt.Printf("  ◊ %s: %s [P%d - %s]\n", dep.ID, dep.Title, dep.Priority, dep.Status)
+						if closedCount == len(children) {
+							fmt.Printf("  %s %d/%d complete (%d%%) — eligible for close\n", ui.RenderPass("✓"), closedCount, len(children), pct)
+						} else {
+							fmt.Printf("  %s %d/%d complete (%d%%)\n", ui.RenderMuted("◐"), closedCount, len(children), pct)
 						}
 					}
 				}
-			} else {
-				// Fallback for non-SQLite storage
-				dependents, _ := store.GetDependents(ctx, issue.ID)
-				if len(dependents) > 0 {
-					fmt.Printf("\nBlocks (%d):\n", len(dependents))
-					for _, dep := range dependents {
-						fmt.Printf("  ← %s: %s [P%d - %s]\n", dep.ID, dep.Title, dep.Priority, dep.Status)
+				if len(blocks) > 0 {
+					fmt.Printf("\n%s\n", ui.RenderBold("BLOCKS"))
+					for _, dep := range blocks {
+						fmt.Println(formatDependencyLine("←", dep))
 					}
+				}
+				if len(discovered) > 0 {
+					fmt.Printf("\n%s\n", ui.RenderBold("DISCOVERED"))
+					for _, dep := range discovered {
+						fmt.Println(formatDependencyLine("◊", dep))
+					}
+				}
+			}
+
+			// Print deduplicated RELATED section (bidirectional links shown once)
+			if len(relatedSeen) > 0 {
+				fmt.Printf("\n%s\n", ui.RenderBold("RELATED"))
+				for _, dep := range relatedSeen {
+					fmt.Println(formatDependencyLine("↔", dep))
 				}
 			}
 
 			// Show comments
-			comments, _ := store.GetIssueComments(ctx, issue.ID)
+			comments, _ := issueStore.GetIssueComments(ctx, issue.ID) // Best effort: show issue even if comments unavailable
 			if len(comments) > 0 {
-				fmt.Printf("\nComments (%d):\n", len(comments))
+				fmt.Printf("\n%s\n", ui.RenderBold("COMMENTS"))
 				for _, comment := range comments {
-					fmt.Printf("  [%s at %s]\n  %s\n\n", comment.Author, comment.CreatedAt.Format("2006-01-02 15:04"), comment.Text)
+					fmt.Printf("  %s %s\n", ui.RenderMuted(formatTime(comment.CreatedAt)), comment.Author)
+					rendered := ui.RenderMarkdown(comment.Text)
+					// TrimRight removes trailing newlines that Glamour adds, preventing extra blank lines
+					for _, line := range strings.Split(strings.TrimRight(rendered, "\n"), "\n") {
+						fmt.Printf("    %s\n", line)
+					}
 				}
+			}
+
+			// Long mode: show all extended fields
+			if longMode {
+				fmt.Print(formatIssueLongExtras(issue, formatTime))
 			}
 
 			fmt.Println()
+			result.Close() // Close routed storage after each iteration
 		}
 
-		if jsonOutput && len(allDetails) > 0 {
-			outputJSON(allDetails)
-		} else if len(allDetails) > 0 {
+		if jsonOutput {
+			if len(allDetails) > 0 {
+				outputJSON(allDetails)
+			} else {
+				// No issues found - exit non-zero with structured JSON error
+				// so downstream consumers (e.g., gt bd move) get a proper error
+				// instead of empty stdout causing "unexpected end of JSON input"
+				FatalErrorRespectJSON("no issues found matching the provided IDs")
+			}
+		} else if foundCount > 0 {
 			// Show tip after successful show (non-JSON mode)
 			maybeShowTip(store)
-		}
-	},
-}
-
-var updateCmd = &cobra.Command{
-	Use:     "update [id...]",
-	GroupID: "issues",
-	Short:   "Update one or more issues",
-	Args:    cobra.MinimumNArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
-		CheckReadonly("update")
-		jsonOutput, _ := cmd.Flags().GetBool("json")
-		updates := make(map[string]interface{})
-
-		if cmd.Flags().Changed("status") {
-			status, _ := cmd.Flags().GetString("status")
-			updates["status"] = status
-		}
-		if cmd.Flags().Changed("priority") {
-			priorityStr, _ := cmd.Flags().GetString("priority")
-			priority, err := validation.ValidatePriority(priorityStr)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-			updates["priority"] = priority
-		}
-		if cmd.Flags().Changed("title") {
-			title, _ := cmd.Flags().GetString("title")
-			updates["title"] = title
-		}
-		if cmd.Flags().Changed("assignee") {
-			assignee, _ := cmd.Flags().GetString("assignee")
-			updates["assignee"] = assignee
-		}
-		description, descChanged := getDescriptionFlag(cmd)
-		if descChanged {
-			updates["description"] = description
-		}
-		if cmd.Flags().Changed("design") {
-			design, _ := cmd.Flags().GetString("design")
-			updates["design"] = design
-		}
-		if cmd.Flags().Changed("notes") {
-			notes, _ := cmd.Flags().GetString("notes")
-			updates["notes"] = notes
-		}
-		if cmd.Flags().Changed("acceptance") || cmd.Flags().Changed("acceptance-criteria") {
-			var acceptanceCriteria string
-			if cmd.Flags().Changed("acceptance") {
-				acceptanceCriteria, _ = cmd.Flags().GetString("acceptance")
-			} else {
-				acceptanceCriteria, _ = cmd.Flags().GetString("acceptance-criteria")
-			}
-			updates["acceptance_criteria"] = acceptanceCriteria
-		}
-		if cmd.Flags().Changed("external-ref") {
-			externalRef, _ := cmd.Flags().GetString("external-ref")
-			updates["external_ref"] = externalRef
-		}
-		if cmd.Flags().Changed("estimate") {
-			estimate, _ := cmd.Flags().GetInt("estimate")
-			if estimate < 0 {
-				fmt.Fprintf(os.Stderr, "Error: estimate must be a non-negative number of minutes\n")
-				os.Exit(1)
-			}
-			updates["estimated_minutes"] = estimate
-		}
-		if cmd.Flags().Changed("type") {
-			issueType, _ := cmd.Flags().GetString("type")
-			// Validate issue type
-			if !types.IssueType(issueType).IsValid() {
-				fmt.Fprintf(os.Stderr, "Error: invalid issue type %q. Valid types: bug, feature, task, epic, chore\n", issueType)
-				os.Exit(1)
-			}
-			updates["issue_type"] = issueType
-		}
-		if cmd.Flags().Changed("add-label") {
-			addLabels, _ := cmd.Flags().GetStringSlice("add-label")
-			updates["add_labels"] = addLabels
-		}
-		if cmd.Flags().Changed("remove-label") {
-			removeLabels, _ := cmd.Flags().GetStringSlice("remove-label")
-			updates["remove_labels"] = removeLabels
-		}
-		if cmd.Flags().Changed("set-labels") {
-			setLabels, _ := cmd.Flags().GetStringSlice("set-labels")
-			updates["set_labels"] = setLabels
-		}
-		if cmd.Flags().Changed("type") {
-			issueType, _ := cmd.Flags().GetString("type")
-			// Validate issue type
-			if _, err := validation.ParseIssueType(issueType); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-			updates["issue_type"] = issueType
-		}
-
-		if len(updates) == 0 {
-			fmt.Println("No updates specified")
-			return
-		}
-
-		ctx := rootCtx
-
-		// Resolve partial IDs first
-		var resolvedIDs []string
-		if daemonClient != nil {
-			for _, id := range args {
-				resolveArgs := &rpc.ResolveIDArgs{ID: id}
-				resp, err := daemonClient.ResolveID(resolveArgs)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error resolving ID %s: %v\n", id, err)
-					os.Exit(1)
-				}
-				var resolvedID string
-				if err := json.Unmarshal(resp.Data, &resolvedID); err != nil {
-					fmt.Fprintf(os.Stderr, "Error unmarshaling resolved ID: %v\n", err)
-					os.Exit(1)
-				}
-				resolvedIDs = append(resolvedIDs, resolvedID)
-			}
 		} else {
-			var err error
-			resolvedIDs, err = utils.ResolvePartialIDs(ctx, store, args)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
+			os.Exit(1)
 		}
 
-		// If daemon is running, use RPC
-		if daemonClient != nil {
-			updatedIssues := []*types.Issue{}
-			for _, id := range resolvedIDs {
-				updateArgs := &rpc.UpdateArgs{ID: id}
-
-				// Map updates to RPC args
-				if status, ok := updates["status"].(string); ok {
-					updateArgs.Status = &status
-				}
-				if priority, ok := updates["priority"].(int); ok {
-					updateArgs.Priority = &priority
-				}
-				if title, ok := updates["title"].(string); ok {
-					updateArgs.Title = &title
-				}
-				if assignee, ok := updates["assignee"].(string); ok {
-					updateArgs.Assignee = &assignee
-				}
-				if description, ok := updates["description"].(string); ok {
-					updateArgs.Description = &description
-				}
-				if design, ok := updates["design"].(string); ok {
-					updateArgs.Design = &design
-				}
-				if notes, ok := updates["notes"].(string); ok {
-					updateArgs.Notes = &notes
-				}
-				if acceptanceCriteria, ok := updates["acceptance_criteria"].(string); ok {
-					updateArgs.AcceptanceCriteria = &acceptanceCriteria
-				}
-				if externalRef, ok := updates["external_ref"].(string); ok {
-					updateArgs.ExternalRef = &externalRef
-				}
-				if estimate, ok := updates["estimated_minutes"].(int); ok {
-					updateArgs.EstimatedMinutes = &estimate
-				}
-				if issueType, ok := updates["issue_type"].(string); ok {
-					updateArgs.IssueType = &issueType
-				}
-				if addLabels, ok := updates["add_labels"].([]string); ok {
-					updateArgs.AddLabels = addLabels
-				}
-				if removeLabels, ok := updates["remove_labels"].([]string); ok {
-					updateArgs.RemoveLabels = removeLabels
-				}
-				if setLabels, ok := updates["set_labels"].([]string); ok {
-					updateArgs.SetLabels = setLabels
-				}
-				if issueType, ok := updates["issue_type"].(string); ok {
-					updateArgs.IssueType = &issueType
-				}
-
-				resp, err := daemonClient.Update(updateArgs)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
-					continue
-				}
-
-				var issue types.Issue
-				if err := json.Unmarshal(resp.Data, &issue); err == nil {
-					// Run update hook (bd-kwro.8)
-					if hookRunner != nil {
-						hookRunner.Run(hooks.EventUpdate, &issue)
-					}
-					if jsonOutput {
-						updatedIssues = append(updatedIssues, &issue)
-					}
-				}
-				if !jsonOutput {
-					fmt.Printf("%s Updated issue: %s\n", ui.RenderPass("✓"), id)
-				}
-			}
-
-			if jsonOutput && len(updatedIssues) > 0 {
-				outputJSON(updatedIssues)
-			}
-			return
-		}
-
-		// Direct mode
-		updatedIssues := []*types.Issue{}
-		for _, id := range resolvedIDs {
-			// Check if issue is a template (beads-1ra): templates are read-only
-			issue, err := store.GetIssue(ctx, id)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error getting %s: %v\n", id, err)
-				continue
-			}
-			if issue != nil && issue.IsTemplate {
-				fmt.Fprintf(os.Stderr, "Error: cannot update template %s: templates are read-only; use 'bd molecule instantiate' to create a work item\n", id)
-				continue
-			}
-
-			// Apply regular field updates if any
-			regularUpdates := make(map[string]interface{})
-			for k, v := range updates {
-				if k != "add_labels" && k != "remove_labels" && k != "set_labels" {
-					regularUpdates[k] = v
-				}
-			}
-			if len(regularUpdates) > 0 {
-				if err := store.UpdateIssue(ctx, id, regularUpdates, actor); err != nil {
-					fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
-					continue
-				}
-			}
-
-			// Handle label operations
-			// Set labels (replaces all existing labels)
-			if setLabels, ok := updates["set_labels"].([]string); ok && len(setLabels) > 0 {
-				// Get current labels
-				currentLabels, err := store.GetLabels(ctx, id)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error getting labels for %s: %v\n", id, err)
-					continue
-				}
-				// Remove all current labels
-				for _, label := range currentLabels {
-					if err := store.RemoveLabel(ctx, id, label, actor); err != nil {
-						fmt.Fprintf(os.Stderr, "Error removing label %s from %s: %v\n", label, id, err)
-						continue
-					}
-				}
-				// Add new labels
-				for _, label := range setLabels {
-					if err := store.AddLabel(ctx, id, label, actor); err != nil {
-						fmt.Fprintf(os.Stderr, "Error setting label %s on %s: %v\n", label, id, err)
-						continue
-					}
-				}
-			}
-
-			// Add labels
-			if addLabels, ok := updates["add_labels"].([]string); ok {
-				for _, label := range addLabels {
-					if err := store.AddLabel(ctx, id, label, actor); err != nil {
-						fmt.Fprintf(os.Stderr, "Error adding label %s to %s: %v\n", label, id, err)
-						continue
-					}
-				}
-			}
-
-			// Remove labels
-			if removeLabels, ok := updates["remove_labels"].([]string); ok {
-				for _, label := range removeLabels {
-					if err := store.RemoveLabel(ctx, id, label, actor); err != nil {
-						fmt.Fprintf(os.Stderr, "Error removing label %s from %s: %v\n", label, id, err)
-						continue
-					}
-				}
-			}
-
-			// Run update hook (bd-kwro.8)
-			updatedIssue, _ := store.GetIssue(ctx, id)
-			if updatedIssue != nil && hookRunner != nil {
-				hookRunner.Run(hooks.EventUpdate, updatedIssue)
-			}
-
-			if jsonOutput {
-				if updatedIssue != nil {
-					updatedIssues = append(updatedIssues, updatedIssue)
-				}
-			} else {
-				fmt.Printf("%s Updated issue: %s\n", ui.RenderPass("✓"), id)
-			}
-		}
-
-		// Schedule auto-flush if any issues were updated
+		// Track first shown issue as last touched
 		if len(args) > 0 {
-			markDirtyAndScheduleFlush()
-		}
-
-		if jsonOutput && len(updatedIssues) > 0 {
-			outputJSON(updatedIssues)
+			SetLastTouchedID(args[0])
 		}
 	},
-}
-
-var editCmd = &cobra.Command{
-	Use:     "edit [id]",
-	GroupID: "issues",
-	Short:   "Edit an issue field in $EDITOR",
-	Long: `Edit an issue field using your configured $EDITOR.
-
-By default, edits the description. Use flags to edit other fields.
-
-Examples:
-  bd edit bd-42                    # Edit description
-  bd edit bd-42 --title            # Edit title
-  bd edit bd-42 --design           # Edit design notes
-  bd edit bd-42 --notes            # Edit notes
-  bd edit bd-42 --acceptance       # Edit acceptance criteria`,
-	Args: cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
-		CheckReadonly("edit")
-		id := args[0]
-		ctx := rootCtx
-
-		// Resolve partial ID if in direct mode
-		if daemonClient == nil {
-			fullID, err := utils.ResolvePartialID(ctx, store, id)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
-				os.Exit(1)
-			}
-			id = fullID
-		}
-
-		// Determine which field to edit
-		fieldToEdit := "description"
-		if cmd.Flags().Changed("title") {
-			fieldToEdit = "title"
-		} else if cmd.Flags().Changed("design") {
-			fieldToEdit = "design"
-		} else if cmd.Flags().Changed("notes") {
-			fieldToEdit = "notes"
-		} else if cmd.Flags().Changed("acceptance") {
-			fieldToEdit = "acceptance_criteria"
-		}
-
-		// Get the editor from environment
-		editor := os.Getenv("EDITOR")
-		if editor == "" {
-			editor = os.Getenv("VISUAL")
-		}
-		if editor == "" {
-			// Try common defaults
-			for _, defaultEditor := range []string{"vim", "vi", "nano", "emacs"} {
-				if _, err := exec.LookPath(defaultEditor); err == nil {
-					editor = defaultEditor
-					break
-				}
-			}
-		}
-		if editor == "" {
-			fmt.Fprintf(os.Stderr, "Error: No editor found. Set $EDITOR or $VISUAL environment variable.\n")
-			os.Exit(1)
-		}
-
-		// Get the current issue
-		var issue *types.Issue
-		var err error
-
-		if daemonClient != nil {
-			// Daemon mode
-			showArgs := &rpc.ShowArgs{ID: id}
-			resp, err := daemonClient.Show(showArgs)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error fetching issue %s: %v\n", id, err)
-				os.Exit(1)
-			}
-
-			issue = &types.Issue{}
-			if err := json.Unmarshal(resp.Data, issue); err != nil {
-				fmt.Fprintf(os.Stderr, "Error parsing issue data: %v\n", err)
-				os.Exit(1)
-			}
-		} else {
-			// Direct mode
-			issue, err = store.GetIssue(ctx, id)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error fetching issue %s: %v\n", id, err)
-				os.Exit(1)
-			}
-			if issue == nil {
-				fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
-				os.Exit(1)
-			}
-		}
-
-		// Get the current field value
-		var currentValue string
-		switch fieldToEdit {
-		case "title":
-			currentValue = issue.Title
-		case "description":
-			currentValue = issue.Description
-		case "design":
-			currentValue = issue.Design
-		case "notes":
-			currentValue = issue.Notes
-		case "acceptance_criteria":
-			currentValue = issue.AcceptanceCriteria
-		}
-
-		// Create a temporary file with the current value
-		tmpFile, err := os.CreateTemp("", fmt.Sprintf("bd-edit-%s-*.txt", fieldToEdit))
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating temp file: %v\n", err)
-			os.Exit(1)
-		}
-		tmpPath := tmpFile.Name()
-		defer func() { _ = os.Remove(tmpPath) }()
-
-		// Write current value to temp file
-		if _, err := tmpFile.WriteString(currentValue); err != nil {
-			_ = tmpFile.Close()
-			fmt.Fprintf(os.Stderr, "Error writing to temp file: %v\n", err)
-			os.Exit(1)
-		}
-		_ = tmpFile.Close()
-
-		// Open the editor
-		editorCmd := exec.Command(editor, tmpPath)
-		editorCmd.Stdin = os.Stdin
-		editorCmd.Stdout = os.Stdout
-		editorCmd.Stderr = os.Stderr
-
-		if err := editorCmd.Run(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error running editor: %v\n", err)
-			os.Exit(1)
-		}
-
-		// Read the edited content
-		// #nosec G304 -- tmpPath was created earlier in this function
-		editedContent, err := os.ReadFile(tmpPath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error reading edited file: %v\n", err)
-			os.Exit(1)
-		}
-
-		newValue := string(editedContent)
-
-		// Check if the value changed
-		if newValue == currentValue {
-			fmt.Println("No changes made")
-			return
-		}
-
-		// Validate title if editing title
-		if fieldToEdit == "title" && strings.TrimSpace(newValue) == "" {
-			fmt.Fprintf(os.Stderr, "Error: title cannot be empty\n")
-			os.Exit(1)
-		}
-
-		// Update the issue
-		updates := map[string]interface{}{
-			fieldToEdit: newValue,
-		}
-
-		if daemonClient != nil {
-			// Daemon mode
-			updateArgs := &rpc.UpdateArgs{ID: id}
-
-			switch fieldToEdit {
-			case "title":
-				updateArgs.Title = &newValue
-			case "description":
-				updateArgs.Description = &newValue
-			case "design":
-				updateArgs.Design = &newValue
-			case "notes":
-				updateArgs.Notes = &newValue
-			case "acceptance_criteria":
-				updateArgs.AcceptanceCriteria = &newValue
-			}
-
-			_, err := daemonClient.Update(updateArgs)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error updating issue: %v\n", err)
-				os.Exit(1)
-			}
-		} else {
-			// Direct mode
-			if err := store.UpdateIssue(ctx, id, updates, actor); err != nil {
-				fmt.Fprintf(os.Stderr, "Error updating issue: %v\n", err)
-				os.Exit(1)
-			}
-			markDirtyAndScheduleFlush()
-		}
-
-		fieldName := strings.ReplaceAll(fieldToEdit, "_", " ")
-		fmt.Printf("%s Updated %s for issue: %s\n", ui.RenderPass("✓"), fieldName, id)
-	},
-}
-
-var closeCmd = &cobra.Command{
-	Use:     "close [id...]",
-	GroupID: "issues",
-	Short:   "Close one or more issues",
-	Args:    cobra.MinimumNArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
-		CheckReadonly("close")
-		reason, _ := cmd.Flags().GetString("reason")
-		if reason == "" {
-			reason = "Closed"
-		}
-		jsonOutput, _ := cmd.Flags().GetBool("json")
-		force, _ := cmd.Flags().GetBool("force")
-		continueFlag, _ := cmd.Flags().GetBool("continue")
-		noAuto, _ := cmd.Flags().GetBool("no-auto")
-
-		ctx := rootCtx
-
-		// --continue only works with a single issue
-		if continueFlag && len(args) > 1 {
-			fmt.Fprintf(os.Stderr, "Error: --continue only works when closing a single issue\n")
-			os.Exit(1)
-		}
-
-		// Resolve partial IDs first
-		var resolvedIDs []string
-		if daemonClient != nil {
-			for _, id := range args {
-				resolveArgs := &rpc.ResolveIDArgs{ID: id}
-				resp, err := daemonClient.ResolveID(resolveArgs)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error resolving ID %s: %v\n", id, err)
-					os.Exit(1)
-				}
-				var resolvedID string
-				if err := json.Unmarshal(resp.Data, &resolvedID); err != nil {
-					fmt.Fprintf(os.Stderr, "Error unmarshaling resolved ID: %v\n", err)
-					os.Exit(1)
-				}
-				resolvedIDs = append(resolvedIDs, resolvedID)
-			}
-		} else {
-			var err error
-			resolvedIDs, err = utils.ResolvePartialIDs(ctx, store, args)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-		}
-
-		// If daemon is running, use RPC
-		if daemonClient != nil {
-			closedIssues := []*types.Issue{}
-			for _, id := range resolvedIDs {
-				// Get issue for template and pinned checks
-				showArgs := &rpc.ShowArgs{ID: id}
-				showResp, showErr := daemonClient.Show(showArgs)
-				if showErr == nil {
-					var issue types.Issue
-					if json.Unmarshal(showResp.Data, &issue) == nil {
-						// Check if issue is a template (beads-1ra): templates are read-only
-						if issue.IsTemplate {
-							fmt.Fprintf(os.Stderr, "Error: cannot close template %s: templates are read-only\n", id)
-							continue
-						}
-						// Check if issue is pinned (bd-6v2)
-						if !force && issue.Status == types.StatusPinned {
-							fmt.Fprintf(os.Stderr, "Error: cannot close pinned issue %s (use --force to override)\n", id)
-							continue
-						}
-					}
-				}
-
-				closeArgs := &rpc.CloseArgs{
-					ID:     id,
-					Reason: reason,
-				}
-				resp, err := daemonClient.CloseIssue(closeArgs)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", id, err)
-					continue
-				}
-
-				var issue types.Issue
-				if err := json.Unmarshal(resp.Data, &issue); err == nil {
-					// Run close hook (bd-kwro.8)
-					if hookRunner != nil {
-						hookRunner.Run(hooks.EventClose, &issue)
-					}
-					if jsonOutput {
-						closedIssues = append(closedIssues, &issue)
-					}
-				}
-				if !jsonOutput {
-					fmt.Printf("%s Closed %s: %s\n", ui.RenderPass("✓"), id, reason)
-				}
-			}
-
-			// Handle --continue flag in daemon mode (bd-ieyy)
-			// Note: --continue requires direct database access to walk parent-child chain
-			if continueFlag && len(closedIssues) > 0 {
-				fmt.Fprintf(os.Stderr, "\nNote: --continue requires direct database access\n")
-				fmt.Fprintf(os.Stderr, "Hint: use --no-daemon flag: bd --no-daemon close %s --continue\n", resolvedIDs[0])
-			}
-
-			if jsonOutput && len(closedIssues) > 0 {
-				outputJSON(closedIssues)
-			}
-			return
-		}
-
-		// Direct mode
-		closedIssues := []*types.Issue{}
-		closedCount := 0
-		for _, id := range resolvedIDs {
-			// Get issue for checks
-			issue, _ := store.GetIssue(ctx, id)
-
-			// Check if issue is a template (beads-1ra): templates are read-only
-			if issue != nil && issue.IsTemplate {
-				fmt.Fprintf(os.Stderr, "Error: cannot close template %s: templates are read-only\n", id)
-				continue
-			}
-
-			// Check if issue is pinned (bd-6v2)
-			if !force {
-				if issue != nil && issue.Status == types.StatusPinned {
-					fmt.Fprintf(os.Stderr, "Error: cannot close pinned issue %s (use --force to override)\n", id)
-					continue
-				}
-			}
-
-			if err := store.CloseIssue(ctx, id, reason, actor); err != nil {
-				fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", id, err)
-				continue
-			}
-
-			closedCount++
-
-			// Run close hook (bd-kwro.8)
-			closedIssue, _ := store.GetIssue(ctx, id)
-			if closedIssue != nil && hookRunner != nil {
-				hookRunner.Run(hooks.EventClose, closedIssue)
-			}
-
-			if jsonOutput {
-				if closedIssue != nil {
-					closedIssues = append(closedIssues, closedIssue)
-				}
-			} else {
-				fmt.Printf("%s Closed %s: %s\n", ui.RenderPass("✓"), id, reason)
-			}
-		}
-
-		// Schedule auto-flush if any issues were closed
-		if len(args) > 0 {
-			markDirtyAndScheduleFlush()
-		}
-
-		// Handle --continue flag (bd-ieyy)
-		if continueFlag && len(resolvedIDs) == 1 && closedCount > 0 {
-			autoClaim := !noAuto
-			result, err := AdvanceToNextStep(ctx, store, resolvedIDs[0], autoClaim, actor)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: could not advance to next step: %v\n", err)
-			} else if result != nil {
-				if jsonOutput {
-					// Include continue result in JSON output
-					outputJSON(map[string]interface{}{
-						"closed":   closedIssues,
-						"continue": result,
-					})
-					return
-				}
-				PrintContinueResult(result)
-			}
-		}
-
-		if jsonOutput && len(closedIssues) > 0 {
-			outputJSON(closedIssues)
-		}
-	},
-}
-
-// showMessageThread displays a full conversation thread for a message
-func showMessageThread(ctx context.Context, messageID string, jsonOutput bool) {
-	// Get the starting message
-	var startMsg *types.Issue
-	var err error
-
-	if daemonClient != nil {
-		resp, err := daemonClient.Show(&rpc.ShowArgs{ID: messageID})
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error fetching message %s: %v\n", messageID, err)
-			os.Exit(1)
-		}
-		if err := json.Unmarshal(resp.Data, &startMsg); err != nil {
-			fmt.Fprintf(os.Stderr, "Error parsing response: %v\n", err)
-			os.Exit(1)
-		}
-	} else {
-		startMsg, err = store.GetIssue(ctx, messageID)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error fetching message %s: %v\n", messageID, err)
-			os.Exit(1)
-		}
-	}
-
-	if startMsg == nil {
-		fmt.Fprintf(os.Stderr, "Message %s not found\n", messageID)
-		os.Exit(1)
-	}
-
-	// Find the root of the thread by following replies-to dependencies upward
-	// Per Decision 004, RepliesTo is now stored as a dependency, not an Issue field
-	rootMsg := startMsg
-	seen := make(map[string]bool)
-	seen[rootMsg.ID] = true
-
-	for {
-		// Find parent via replies-to dependency
-		parentID := findRepliesTo(ctx, rootMsg.ID, daemonClient, store)
-		if parentID == "" {
-			break // No parent, this is the root
-		}
-		if seen[parentID] {
-			break // Avoid infinite loops
-		}
-		seen[parentID] = true
-
-		var parentMsg *types.Issue
-		if daemonClient != nil {
-			resp, err := daemonClient.Show(&rpc.ShowArgs{ID: parentID})
-			if err != nil {
-				break // Parent not found, use current as root
-			}
-			if err := json.Unmarshal(resp.Data, &parentMsg); err != nil {
-				break
-			}
-		} else {
-			parentMsg, _ = store.GetIssue(ctx, parentID)
-		}
-		if parentMsg == nil {
-			break
-		}
-		rootMsg = parentMsg
-	}
-
-	// Now collect all messages in the thread
-	// Start from root and find all replies
-	// Build a map of child ID -> parent ID for display purposes
-	threadMessages := []*types.Issue{rootMsg}
-	threadIDs := map[string]bool{rootMsg.ID: true}
-	repliesTo := map[string]string{} // child ID -> parent ID
-	queue := []string{rootMsg.ID}
-
-	// BFS to find all replies
-	for len(queue) > 0 {
-		currentID := queue[0]
-		queue = queue[1:]
-
-		// Find all messages that reply to currentID via replies-to dependency
-		// Per Decision 004, replies are found via dependents with type replies-to
-		replies := findReplies(ctx, currentID, daemonClient, store)
-
-		for _, reply := range replies {
-			if threadIDs[reply.ID] {
-				continue // Already seen
-			}
-			threadMessages = append(threadMessages, reply)
-			threadIDs[reply.ID] = true
-			repliesTo[reply.ID] = currentID // Track parent for display
-			queue = append(queue, reply.ID)
-		}
-	}
-
-	// Sort by creation time
-	slices.SortFunc(threadMessages, func(a, b *types.Issue) int {
-		return a.CreatedAt.Compare(b.CreatedAt)
-	})
-
-	if jsonOutput {
-		encoder := json.NewEncoder(os.Stdout)
-		encoder.SetIndent("", "  ")
-		_ = encoder.Encode(threadMessages)
-		return
-	}
-
-	// Display the thread
-	fmt.Printf("\n%s Thread: %s\n", ui.RenderAccent("📬"), rootMsg.Title)
-	fmt.Println(strings.Repeat("─", 66))
-
-	for _, msg := range threadMessages {
-		// Show indent based on depth (count replies_to chain using our map)
-		depth := 0
-		parent := repliesTo[msg.ID]
-		for parent != "" && depth < 5 {
-			depth++
-			parent = repliesTo[parent]
-		}
-		indent := strings.Repeat("  ", depth)
-
-		// Format timestamp
-		timeStr := msg.CreatedAt.Format("2006-01-02 15:04")
-
-		// Status indicator
-		statusIcon := "📧"
-		if msg.Status == types.StatusClosed {
-			statusIcon = "✓"
-		}
-
-		fmt.Printf("%s%s %s %s\n", indent, statusIcon, ui.RenderAccent(msg.ID), ui.RenderMuted(timeStr))
-		fmt.Printf("%s  From: %s  To: %s\n", indent, msg.Sender, msg.Assignee)
-		if parentID := repliesTo[msg.ID]; parentID != "" {
-			fmt.Printf("%s  Re: %s\n", indent, parentID)
-		}
-		fmt.Printf("%s  %s: %s\n", indent, ui.RenderMuted("Subject"), msg.Title)
-		if msg.Description != "" {
-			// Indent the body
-			bodyLines := strings.Split(msg.Description, "\n")
-			for _, line := range bodyLines {
-				fmt.Printf("%s  %s\n", indent, line)
-			}
-		}
-		fmt.Println()
-	}
-
-	fmt.Printf("Total: %d messages in thread\n\n", len(threadMessages))
-}
-
-// findRepliesTo finds the parent ID that this issue replies to via replies-to dependency.
-// Returns empty string if no parent found.
-func findRepliesTo(ctx context.Context, issueID string, daemonClient *rpc.Client, store storage.Storage) string {
-	if daemonClient != nil {
-		// In daemon mode, use Show to get dependencies with metadata
-		resp, err := daemonClient.Show(&rpc.ShowArgs{ID: issueID})
-		if err != nil {
-			return ""
-		}
-		// Parse the full show response to get dependencies
-		type showResponse struct {
-			Dependencies []struct {
-				ID             string `json:"id"`
-				DependencyType string `json:"dependency_type"`
-			} `json:"dependencies"`
-		}
-		var details showResponse
-		if err := json.Unmarshal(resp.Data, &details); err != nil {
-			return ""
-		}
-		for _, dep := range details.Dependencies {
-			if dep.DependencyType == string(types.DepRepliesTo) {
-				return dep.ID
-			}
-		}
-		return ""
-	}
-	// Direct mode - query storage
-	if sqliteStore, ok := store.(*sqlite.SQLiteStorage); ok {
-		deps, err := sqliteStore.GetDependenciesWithMetadata(ctx, issueID)
-		if err != nil {
-			return ""
-		}
-		for _, dep := range deps {
-			if dep.DependencyType == types.DepRepliesTo {
-				return dep.ID
-			}
-		}
-	}
-	return ""
-}
-
-// findReplies finds all issues that reply to this issue via replies-to dependency.
-func findReplies(ctx context.Context, issueID string, daemonClient *rpc.Client, store storage.Storage) []*types.Issue {
-	if daemonClient != nil {
-		// In daemon mode, use Show to get dependents with metadata
-		resp, err := daemonClient.Show(&rpc.ShowArgs{ID: issueID})
-		if err != nil {
-			return nil
-		}
-		// Parse the full show response to get dependents
-		type showResponse struct {
-			Dependents []struct {
-				types.Issue
-				DependencyType string `json:"dependency_type"`
-			} `json:"dependents"`
-		}
-		var details showResponse
-		if err := json.Unmarshal(resp.Data, &details); err != nil {
-			return nil
-		}
-		var replies []*types.Issue
-		for _, dep := range details.Dependents {
-			if dep.DependencyType == string(types.DepRepliesTo) {
-				issue := dep.Issue // Copy to avoid aliasing
-				replies = append(replies, &issue)
-			}
-		}
-		return replies
-	}
-	// Direct mode - query storage
-	if sqliteStore, ok := store.(*sqlite.SQLiteStorage); ok {
-		deps, err := sqliteStore.GetDependentsWithMetadata(ctx, issueID)
-		if err != nil {
-			return nil
-		}
-		var replies []*types.Issue
-		for _, dep := range deps {
-			if dep.DependencyType == types.DepRepliesTo {
-				issue := dep.Issue // Copy to avoid aliasing
-				replies = append(replies, &issue)
-			}
-		}
-		return replies
-	}
-	return nil
 }
 
 func init() {
-	showCmd.Flags().Bool("json", false, "Output JSON format")
 	showCmd.Flags().Bool("thread", false, "Show full conversation thread (for messages)")
+	showCmd.Flags().Bool("short", false, "Show compact one-line output per issue")
+	showCmd.Flags().Bool("long", false, "Show all available fields (extended metadata, agent identity, gate fields, etc.)")
+	showCmd.Flags().Bool("refs", false, "Show issues that reference this issue (reverse lookup)")
+	showCmd.Flags().Bool("children", false, "Show only the children of this issue")
+	showCmd.Flags().String("as-of", "", "Show issue as it existed at a specific commit hash or branch (requires Dolt)")
+	showCmd.Flags().StringArray("id", nil, "Issue ID (use for IDs that look like flags, e.g., --id=gt--xyz)")
+	showCmd.Flags().Bool("local-time", false, "Show timestamps in local time instead of UTC")
+	showCmd.Flags().BoolP("watch", "w", false, "Watch for changes and auto-refresh display")
+	showCmd.Flags().Bool("current", false, "Show the currently active issue (in-progress, hooked, or last touched)")
+	showCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(showCmd)
+}
 
-	updateCmd.Flags().StringP("status", "s", "", "New status")
-	registerPriorityFlag(updateCmd, "")
-	updateCmd.Flags().String("title", "", "New title")
-	updateCmd.Flags().StringP("type", "t", "", "New type (bug|feature|task|epic|chore|merge-request|molecule)")
-	registerCommonIssueFlags(updateCmd)
-	updateCmd.Flags().String("notes", "", "Additional notes")
-	updateCmd.Flags().String("acceptance-criteria", "", "DEPRECATED: use --acceptance")
-	_ = updateCmd.Flags().MarkHidden("acceptance-criteria")
-	updateCmd.Flags().IntP("estimate", "e", 0, "Time estimate in minutes (e.g., 60 for 1 hour)")
-	updateCmd.Flags().StringSlice("add-label", nil, "Add labels (repeatable)")
-	updateCmd.Flags().StringSlice("remove-label", nil, "Remove labels (repeatable)")
-	updateCmd.Flags().StringSlice("set-labels", nil, "Set labels, replacing all existing (repeatable)")
+// resolveCurrentIssueID determines the current active issue for the agent.
+// Priority: in-progress assigned to actor > hooked > last touched.
+func resolveCurrentIssueID(ctx context.Context) string {
+	if store == nil {
+		// No store — fall back to last touched
+		return GetLastTouchedID()
+	}
 
-	updateCmd.Flags().Bool("json", false, "Output JSON format")
-	rootCmd.AddCommand(updateCmd)
+	currentActor := getActorWithGit()
 
-	editCmd.Flags().Bool("title", false, "Edit the title")
-	editCmd.Flags().Bool("description", false, "Edit the description (default)")
-	editCmd.Flags().Bool("design", false, "Edit the design notes")
-	editCmd.Flags().Bool("notes", false, "Edit the notes")
-	editCmd.Flags().Bool("acceptance", false, "Edit the acceptance criteria")
-	rootCmd.AddCommand(editCmd)
+	// 1. In-progress issues assigned to current actor
+	if currentActor != "" {
+		status := types.StatusInProgress
+		filter := types.IssueFilter{
+			Status:   &status,
+			Assignee: &currentActor,
+		}
+		issues, err := store.SearchIssues(ctx, "", filter)
+		if err == nil && len(issues) > 0 {
+			return issues[0].ID
+		}
+	}
 
-	closeCmd.Flags().StringP("reason", "r", "", "Reason for closing")
-	closeCmd.Flags().Bool("json", false, "Output JSON format")
-	closeCmd.Flags().BoolP("force", "f", false, "Force close pinned issues")
-	closeCmd.Flags().Bool("continue", false, "Auto-advance to next step in molecule")
-	closeCmd.Flags().Bool("no-auto", false, "With --continue, show next step but don't claim it")
-	rootCmd.AddCommand(closeCmd)
+	// 2. Hooked issues assigned to current actor
+	if currentActor != "" {
+		status := types.StatusHooked
+		filter := types.IssueFilter{
+			Status:   &status,
+			Assignee: &currentActor,
+		}
+		issues, err := store.SearchIssues(ctx, "", filter)
+		if err == nil && len(issues) > 0 {
+			return issues[0].ID
+		}
+	}
+
+	// 3. Last touched issue (fallback)
+	return GetLastTouchedID()
 }

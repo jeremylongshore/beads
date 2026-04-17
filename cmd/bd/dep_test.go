@@ -1,3 +1,5 @@
+//go:build cgo
+
 package main
 
 import (
@@ -15,6 +17,7 @@ import (
 )
 
 func TestDependencySuite(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	testDB := filepath.Join(tmpDir, ".beads", "beads.db")
 	s := newTestStore(t, testDB)
@@ -230,6 +233,189 @@ func TestDependencySuite(t *testing.T) {
 			t.Errorf("Expected 0 dependencies after removal, got %d", len(deps))
 		}
 	})
+
+	// Merged from TestDepBlocksFlagFunctionality — tests --blocks flag semantics
+	t.Run("BlocksFlagFunctionality", func(t *testing.T) {
+		issues := []*types.Issue{
+			{ID: "test-blocks-1", Title: "Blocker Issue", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask, CreatedAt: time.Now()},
+			{ID: "test-blocks-2", Title: "Blocked Issue", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask, CreatedAt: time.Now()},
+		}
+		for _, issue := range issues {
+			if err := s.CreateIssue(ctx, issue, "test"); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		// "blocker --blocks blocked" means blocked depends on blocker
+		dep := &types.Dependency{
+			IssueID:     "test-blocks-2",
+			DependsOnID: "test-blocks-1",
+			Type:        types.DepBlocks,
+			CreatedAt:   time.Now(),
+		}
+		if err := s.AddDependency(ctx, dep, "test"); err != nil {
+			t.Fatalf("AddDependency failed: %v", err)
+		}
+
+		deps, err := s.GetDependencies(ctx, "test-blocks-2")
+		if err != nil {
+			t.Fatalf("GetDependencies failed: %v", err)
+		}
+		if len(deps) != 1 {
+			t.Fatalf("Expected 1 dependency, got %d", len(deps))
+		}
+		if deps[0].ID != "test-blocks-1" {
+			t.Errorf("Expected blocked issue to depend on test-blocks-1, got %s", deps[0].ID)
+		}
+
+		dependents, err := s.GetDependents(ctx, "test-blocks-1")
+		if err != nil {
+			t.Fatalf("GetDependents failed: %v", err)
+		}
+		if len(dependents) != 1 {
+			t.Fatalf("Expected 1 dependent, got %d", len(dependents))
+		}
+		if dependents[0].ID != "test-blocks-2" {
+			t.Errorf("Expected test-blocks-1 to have dependent test-blocks-2, got %s", dependents[0].ID)
+		}
+	})
+
+	// Merged from TestDepAdd_FKError* and TestDepRemove_FKError — tests
+	// that FK constraint violations produce user-friendly error messages.
+	t.Run("FKError_InvalidFromID", func(t *testing.T) {
+		validIssue := &types.Issue{
+			ID: "test-fk-valid", Title: "Valid Issue", Status: types.StatusOpen,
+			Priority: 1, IssueType: types.TypeTask, CreatedAt: time.Now(),
+		}
+		if err := s.CreateIssue(ctx, validIssue, "test"); err != nil {
+			t.Fatal(err)
+		}
+
+		dep := &types.Dependency{
+			IssueID: "test-nonexistent-from", DependsOnID: "test-fk-valid",
+			Type: types.DepBlocks, CreatedAt: time.Now(),
+		}
+		err := s.AddDependency(ctx, dep, "test")
+		if err == nil {
+			t.Fatal("Expected error when adding dependency with invalid from ID")
+		}
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "FOREIGN KEY constraint failed") || strings.Contains(errMsg, "foreign key constraint failed") {
+			t.Errorf("Error exposes raw FK constraint: %q", errMsg)
+		}
+		if !strings.Contains(errMsg, "not found") && !strings.Contains(errMsg, "Not Found") {
+			t.Errorf("Error message should indicate issue not found: %q", errMsg)
+		}
+	})
+
+	t.Run("FKError_InvalidToID", func(t *testing.T) {
+		dep := &types.Dependency{
+			IssueID: "test-fk-valid", DependsOnID: "test-nonexistent-to",
+			Type: types.DepBlocks, CreatedAt: time.Now(),
+		}
+		err := s.AddDependency(ctx, dep, "test")
+		if err == nil {
+			t.Fatal("Expected error when adding dependency with invalid to ID")
+		}
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "FOREIGN KEY constraint failed") || strings.Contains(errMsg, "foreign key constraint failed") {
+			t.Errorf("Error exposes raw FK constraint: %q", errMsg)
+		}
+		if !strings.Contains(errMsg, "not found") && !strings.Contains(errMsg, "Not Found") {
+			t.Errorf("Error message should indicate dependency target not found: %q", errMsg)
+		}
+	})
+
+	t.Run("FKError_BothInvalid", func(t *testing.T) {
+		dep := &types.Dependency{
+			IssueID: "test-nonexistent-1", DependsOnID: "test-nonexistent-2",
+			Type: types.DepBlocks, CreatedAt: time.Now(),
+		}
+		err := s.AddDependency(ctx, dep, "test")
+		if err == nil {
+			t.Fatal("Expected error when adding dependency with both invalid IDs")
+		}
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "FOREIGN KEY constraint failed") || strings.Contains(errMsg, "foreign key constraint failed") {
+			t.Errorf("Error exposes raw FK constraint: %q", errMsg)
+		}
+		if !strings.Contains(errMsg, "not found") && !strings.Contains(errMsg, "Not Found") {
+			t.Errorf("Error message should indicate issue not found: %q", errMsg)
+		}
+	})
+
+	t.Run("FKError_JSONMode", func(t *testing.T) {
+		dep := &types.Dependency{
+			IssueID: "test-fk-valid", DependsOnID: "test-json-nonexistent",
+			Type: types.DepBlocks, CreatedAt: time.Now(),
+		}
+		err := s.AddDependency(ctx, dep, "test")
+		if err == nil {
+			t.Fatal("Expected error when adding dependency with invalid ID")
+		}
+		if strings.Contains(err.Error(), "FOREIGN KEY") {
+			t.Errorf("Error exposes raw FK constraint (JSON mode): %q", err.Error())
+		}
+	})
+
+	t.Run("FKError_DaemonMode", func(t *testing.T) {
+		dep := &types.Dependency{
+			IssueID: "test-fk-valid", DependsOnID: "test-daemon-nonexistent",
+			Type: types.DepBlocks, CreatedAt: time.Now(),
+		}
+		err := s.AddDependency(ctx, dep, "test")
+		if err == nil {
+			t.Fatal("Expected error when adding dependency with invalid ID via daemon path")
+		}
+		errMsg := err.Error()
+		daemonError := fmt.Sprintf("failed to add dependency: %v", err)
+		if strings.Contains(daemonError, "FOREIGN KEY constraint failed") || strings.Contains(daemonError, "foreign key constraint failed") {
+			t.Errorf("Daemon error exposes raw FK constraint: %q", daemonError)
+		}
+		if !strings.Contains(errMsg, "not found") {
+			t.Errorf("Storage error should indicate not found: %q", errMsg)
+		}
+	})
+
+	t.Run("FKError_RemoveNonexistent", func(t *testing.T) {
+		// Create issues and dep for removal test
+		issue1 := &types.Issue{ID: "test-fk-remove-1", Title: "Issue 1", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask, CreatedAt: time.Now()}
+		issue2 := &types.Issue{ID: "test-fk-remove-2", Title: "Issue 2", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask, CreatedAt: time.Now()}
+		if err := s.CreateIssue(ctx, issue1, "test"); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.CreateIssue(ctx, issue2, "test"); err != nil {
+			t.Fatal(err)
+		}
+		dep := &types.Dependency{
+			IssueID: "test-fk-remove-1", DependsOnID: "test-fk-remove-2",
+			Type: types.DepBlocks, CreatedAt: time.Now(),
+		}
+		if err := s.AddDependency(ctx, dep, "test"); err != nil {
+			t.Fatal(err)
+		}
+
+		// Try removing with non-existent IDs
+		err := s.RemoveDependency(ctx, "test-nonexistent-1", "test-nonexistent-2", "test")
+		if err != nil {
+			errMsg := err.Error()
+			if strings.Contains(errMsg, "FOREIGN KEY constraint failed") || strings.Contains(errMsg, "foreign key constraint failed") {
+				t.Errorf("Error exposes raw FK constraint: %q", errMsg)
+			}
+		}
+
+		// Remove the real dep, then try removing again
+		if err := s.RemoveDependency(ctx, "test-fk-remove-1", "test-fk-remove-2", "test"); err != nil {
+			t.Fatalf("Failed to remove existing dependency: %v", err)
+		}
+		err = s.RemoveDependency(ctx, "test-fk-remove-1", "test-fk-remove-2", "test")
+		if err != nil {
+			errMsg := err.Error()
+			if strings.Contains(errMsg, "FOREIGN KEY") {
+				t.Errorf("Error exposes raw FK constraint: %q", errMsg)
+			}
+		}
+	})
 }
 
 func TestDepCommandsInit(t *testing.T) {
@@ -237,8 +423,8 @@ func TestDepCommandsInit(t *testing.T) {
 		t.Fatal("depCmd should be initialized")
 	}
 
-	if depCmd.Use != "dep" {
-		t.Errorf("Expected Use='dep', got %q", depCmd.Use)
+	if depCmd.Use != "dep [issue-id]" {
+		t.Errorf("Expected Use='dep [issue-id]', got %q", depCmd.Use)
 	}
 
 	if depAddCmd == nil {
@@ -247,6 +433,58 @@ func TestDepCommandsInit(t *testing.T) {
 
 	if depRemoveCmd == nil {
 		t.Fatal("depRemoveCmd should be initialized")
+	}
+}
+
+func TestDepAddFlagAliases(t *testing.T) {
+	// Test that --blocked-by flag exists on depAddCmd
+	blockedByFlag := depAddCmd.Flags().Lookup("blocked-by")
+	if blockedByFlag == nil {
+		t.Fatal("depAddCmd should have --blocked-by flag")
+	}
+	if blockedByFlag.DefValue != "" {
+		t.Errorf("Expected default blocked-by='', got %q", blockedByFlag.DefValue)
+	}
+
+	// Test that --depends-on flag exists on depAddCmd
+	dependsOnFlag := depAddCmd.Flags().Lookup("depends-on")
+	if dependsOnFlag == nil {
+		t.Fatal("depAddCmd should have --depends-on flag")
+	}
+	if dependsOnFlag.DefValue != "" {
+		t.Errorf("Expected default depends-on='', got %q", dependsOnFlag.DefValue)
+	}
+
+	// Verify the help text mentions the flags
+	longDesc := depAddCmd.Long
+	if !strings.Contains(longDesc, "--blocked-by") {
+		t.Error("Expected Long description to mention --blocked-by flag")
+	}
+	if !strings.Contains(longDesc, "--depends-on") {
+		t.Error("Expected Long description to mention --depends-on flag")
+	}
+}
+
+func TestDepBlocksFlag(t *testing.T) {
+	// Test that the --blocks flag exists on depCmd
+	flag := depCmd.Flags().Lookup("blocks")
+	if flag == nil {
+		t.Fatal("depCmd should have --blocks flag")
+	}
+
+	// Test shorthand is -b
+	if flag.Shorthand != "b" {
+		t.Errorf("Expected shorthand='b', got %q", flag.Shorthand)
+	}
+
+	// Test default value is empty string
+	if flag.DefValue != "" {
+		t.Errorf("Expected default blocks='', got %q", flag.DefValue)
+	}
+
+	// Test usage text
+	if !strings.Contains(flag.Usage, "blocks") {
+		t.Errorf("Expected flag usage to mention 'blocks', got %q", flag.Usage)
 	}
 }
 
@@ -451,10 +689,10 @@ func TestOutputMermaidTree_Siblings(t *testing.T) {
 
 	// Verify incorrect edges do NOT exist (siblings shouldn't be connected)
 	incorrectEdges := []string{
-		"BD-2 --> BD-3",   // Siblings shouldn't be connected
-		"BD-3 --> BD-4",   // BD-4's parent is BD-2, not BD-3
-		"BD-4 --> BD-3",   // Wrong direction
-		"BD-4 --> BD-5",   // These are cousins, not parent-child
+		"BD-2 --> BD-3", // Siblings shouldn't be connected
+		"BD-3 --> BD-4", // BD-4's parent is BD-2, not BD-3
+		"BD-4 --> BD-3", // Wrong direction
+		"BD-4 --> BD-5", // These are cousins, not parent-child
 	}
 
 	for _, edge := range incorrectEdges {
@@ -631,7 +869,7 @@ func TestFormatTreeNode(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := formatTreeNode(tt.node)
+			result := formatTreeNode(tt.node, false)
 			for _, want := range tt.contains {
 				if !strings.Contains(result, want) {
 					t.Errorf("formatTreeNode() = %q, want to contain %q", result, want)
@@ -646,6 +884,26 @@ func TestFormatTreeNode(t *testing.T) {
 			}
 		})
 	}
+
+	// Test that blocked root shows [BLOCKED] instead of [READY]
+	t.Run("blocked root shows BLOCKED not READY", func(t *testing.T) {
+		node := &types.TreeNode{
+			Issue: types.Issue{
+				ID:       "BD-10",
+				Title:    "Blocked Root",
+				Status:   types.StatusOpen,
+				Priority: 1,
+			},
+			Depth: 0,
+		}
+		result := formatTreeNode(node, true)
+		if strings.Contains(result, "[READY]") {
+			t.Errorf("blocked root should not show [READY], got: %q", result)
+		}
+		if !strings.Contains(result, "[BLOCKED]") {
+			t.Errorf("blocked root should show [BLOCKED], got: %q", result)
+		}
+	})
 }
 
 func TestRenderTreeOutput(t *testing.T) {
@@ -868,11 +1126,11 @@ func TestMergeBidirectionalTrees_MultipleDepth(t *testing.T) {
 
 	// Verify all IDs are present (except we might have root twice from both trees)
 	expectedIDs := map[string]bool{
-		"root":            false,
-		"dep-1":           false,
-		"dep-1-1":         false,
-		"dependent-1":     false,
-		"dependent-1-1":   false,
+		"root":          false,
+		"dep-1":         false,
+		"dep-1-1":       false,
+		"dependent-1":   false,
+		"dependent-1-1": false,
 	}
 
 	for _, node := range result {
@@ -955,4 +1213,251 @@ func TestMergeBidirectionalTrees_PreservesDepth(t *testing.T) {
 			t.Errorf("Expected dependent-1 depth=3, got %d", node.Depth)
 		}
 	}
+}
+
+// Tests for child→parent dependency detection (bd-nim5)
+// ============================================================================
+// Foreign Key Error Tests (GH#952 Issue 4)
+// ============================================================================
+//
+// These tests verify that foreign key constraint violations produce
+// user-friendly error messages instead of raw database errors.
+//
+// Expected behavior:
+//   - Error should say "issue X or Y not found" (user-friendly)
+//   - Error should NOT say "FOREIGN KEY constraint failed" (raw database error)
+//
+// TRACER BULLET FINDING (Phase 1):
+//   The storage layer (dependencies.go) already validates issue existence
+//   BEFORE inserting into the database, so FK constraint errors don't occur
+//   at the storage layer. Tests PASS because AddDependency returns proper
+//   "not found" errors.
+//
+// If bugs exist, they would be in:
+//   1. CLI layer (dep.go) - when ResolvePartialID has edge cases
+//   2. Daemon RPC layer - if ID resolution behaves differently
+//   3. Race conditions - issue deleted between resolve and add
+//
+// These tests serve as regression tests ensuring the storage layer
+// continues to provide user-friendly error messages.
+
+func TestIsChildOf(t *testing.T) {
+	tests := []struct {
+		name     string
+		childID  string
+		parentID string
+		want     bool
+	}{
+		// Positive cases: should be detected as child
+		{
+			name:     "direct child",
+			childID:  "bd-abc.1",
+			parentID: "bd-abc",
+			want:     true,
+		},
+		{
+			name:     "grandchild",
+			childID:  "bd-abc.1.2",
+			parentID: "bd-abc",
+			want:     true,
+		},
+		{
+			name:     "nested grandchild direct parent",
+			childID:  "bd-abc.1.2",
+			parentID: "bd-abc.1",
+			want:     true,
+		},
+		{
+			name:     "deeply nested child",
+			childID:  "bd-abc.1.2.3",
+			parentID: "bd-abc",
+			want:     true,
+		},
+
+		// Negative cases: should NOT be detected as child
+		{
+			name:     "same ID",
+			childID:  "bd-abc",
+			parentID: "bd-abc",
+			want:     false,
+		},
+		{
+			name:     "not a child - unrelated IDs",
+			childID:  "bd-xyz",
+			parentID: "bd-abc",
+			want:     false,
+		},
+		{
+			name:     "not a child - sibling",
+			childID:  "bd-abc.2",
+			parentID: "bd-abc.1",
+			want:     false,
+		},
+		{
+			name:     "reversed - parent is not child of child",
+			childID:  "bd-abc",
+			parentID: "bd-abc.1",
+			want:     false,
+		},
+		{
+			name:     "prefix but not hierarchical",
+			childID:  "bd-abcd",
+			parentID: "bd-abc",
+			want:     false,
+		},
+		{
+			name:     "not hierarchical ID",
+			childID:  "bd-abc",
+			parentID: "bd-xyz",
+			want:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isChildOf(tt.childID, tt.parentID)
+			if got != tt.want {
+				t.Errorf("isChildOf(%q, %q) = %v, want %v", tt.childID, tt.parentID, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDepListCrossRigRouting tests that bd dep list resolves issues via routing
+// when run from the town root for rig-level issues. This is the regression test
+// for bd-ciouf: "bd dep list cross-rig routing broken from town root".
+//
+// NOTE: This test uses os.Chdir and cannot run in parallel with other tests.
+func TestDepListCrossRigRouting(t *testing.T) {
+	ctx := context.Background()
+
+	// Create temp directory structure:
+	// tmpDir/
+	//   .beads/
+	//     dolt/ (town database, prefix "hq")
+	//     routes.jsonl (routing config)
+	//   rig/
+	//     .beads/
+	//       dolt/ (rig database, prefix "gt")
+	tmpDir := t.TempDir()
+
+	// Create town .beads directory
+	townBeadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(townBeadsDir, 0755); err != nil {
+		t.Fatalf("Failed to create town beads dir: %v", err)
+	}
+
+	// Create rig .beads directory
+	rigBeadsDir := filepath.Join(tmpDir, "rig", ".beads")
+	if err := os.MkdirAll(rigBeadsDir, 0755); err != nil {
+		t.Fatalf("Failed to create rig beads dir: %v", err)
+	}
+
+	// Initialize town database
+	townDBPath := filepath.Join(townBeadsDir, "dolt")
+	townStore := newTestStoreIsolatedDB(t, townDBPath, "hq")
+
+	// Initialize rig database
+	rigDBPath := filepath.Join(rigBeadsDir, "dolt")
+	rigStore := newTestStoreIsolatedDB(t, rigDBPath, "gt")
+
+	// Create test issues in rig database with a dependency
+	parent := &types.Issue{
+		ID:        "gt-parent1",
+		Title:     "Parent Issue",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	child := &types.Issue{
+		ID:        "gt-child1",
+		Title:     "Child Issue",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := rigStore.CreateIssue(ctx, parent, "test"); err != nil {
+		t.Fatalf("Failed to create parent issue: %v", err)
+	}
+	if err := rigStore.CreateIssue(ctx, child, "test"); err != nil {
+		t.Fatalf("Failed to create child issue: %v", err)
+	}
+
+	// gt-child1 depends on gt-parent1 (blocks relationship)
+	dep := &types.Dependency{
+		IssueID:     "gt-child1",
+		DependsOnID: "gt-parent1",
+		Type:        types.DepBlocks,
+	}
+	if err := rigStore.AddDependency(ctx, dep, "test"); err != nil {
+		t.Fatalf("Failed to add dependency: %v", err)
+	}
+
+	// Close rig store to release Dolt lock before routing opens it
+	rigStore.Close()
+
+	// Create routes.jsonl in town .beads directory
+	routesContent := `{"prefix":"gt-","path":"rig"}`
+	routesPath := filepath.Join(townBeadsDir, "routes.jsonl")
+	if err := os.WriteFile(routesPath, []byte(routesContent), 0644); err != nil {
+		t.Fatalf("Failed to write routes.jsonl: %v", err)
+	}
+
+	// Set up global state for routing to work
+	oldDbPath := dbPath
+	dbPath = townDBPath
+	t.Cleanup(func() { dbPath = oldDbPath })
+
+	// Change to tmpDir so routing can find town root via CWD
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Failed to get working directory: %v", err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("Failed to change to temp directory: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+
+	// Test 1: Verify routing resolution works for the rig issue
+	result, err := resolveAndGetIssueWithRouting(ctx, townStore, "gt-child1")
+	if err != nil {
+		t.Fatalf("resolveAndGetIssueWithRouting failed: %v", err)
+	}
+	if result == nil || result.Issue == nil {
+		t.Fatal("resolveAndGetIssueWithRouting returned nil")
+	}
+	defer result.Close()
+
+	if !result.Routed {
+		t.Error("Expected result.Routed to be true for cross-rig lookup")
+	}
+	if result.ResolvedID != "gt-child1" {
+		t.Errorf("Expected resolved ID %q, got %q", "gt-child1", result.ResolvedID)
+	}
+
+	// Test 2: Verify dependencies can be queried from the routed store
+	deps, err := result.Store.GetDependenciesWithMetadata(ctx, result.ResolvedID)
+	if err != nil {
+		t.Fatalf("GetDependenciesWithMetadata on routed store failed: %v", err)
+	}
+	if len(deps) != 1 {
+		t.Fatalf("Expected 1 dependency, got %d", len(deps))
+	}
+	if deps[0].ID != "gt-parent1" {
+		t.Errorf("Expected dependency on gt-parent1, got %s", deps[0].ID)
+	}
+
+	// Test 3: Verify dependents (up direction) also work from routed store
+	dependents, err := result.Store.GetDependentsWithMetadata(ctx, "gt-parent1")
+	if err != nil {
+		t.Fatalf("GetDependentsWithMetadata on routed store failed: %v", err)
+	}
+	if len(dependents) != 1 {
+		t.Fatalf("Expected 1 dependent, got %d", len(dependents))
+	}
+	if dependents[0].ID != "gt-child1" {
+		t.Errorf("Expected dependent gt-child1, got %s", dependents[0].ID)
+	}
+
+	t.Log("Successfully resolved cross-rig dependencies via routing")
 }

@@ -39,8 +39,6 @@ type IssueTemplate struct {
 	Dependencies       []string
 }
 
-
-
 // parseStringList extracts a list of strings from content, splitting by comma or whitespace.
 // This is a generic helper used by parseLabels and parseDependencies.
 func parseStringList(content string) []string {
@@ -224,8 +222,8 @@ func (s *markdownParseState) handleContentLine(line string) {
 		return
 	}
 
-	// First lines after title (before any section) become description
-	if s.currentIssue.Description == "" && line != "" {
+	// Lines after title (before any section) become description
+	if line != "" {
 		if s.currentIssue.Description != "" {
 			s.currentIssue.Description += "\n"
 		}
@@ -306,32 +304,31 @@ func parseMarkdownFile(path string) ([]*IssueTemplate, error) {
 
 // createIssuesFromMarkdown parses a markdown file and creates multiple issues from it
 func createIssuesFromMarkdown(_ *cobra.Command, filepath string) {
-	// Ensure globals are initialized (bd-m0tl: fix nil pointer when store not ready)
+	// Parse markdown file first (doesn't require store access)
+	templates, err := parseMarkdownFile(filepath)
+	if err != nil {
+		FatalError("parsing markdown file: %v", err)
+	}
+
+	if len(templates) == 0 {
+		FatalError("no issues found in markdown file")
+	}
+
+	// Ensure globals are initialized
 	if store == nil {
-		fmt.Fprintf(os.Stderr, "Error: database not initialized\n")
-		os.Exit(1)
+		FatalErrorWithHint("database not initialized",
+			diagHint())
 	}
 	if actor == "" {
 		actor = "bd" // Default actor if not set
 	}
 
-	// Parse markdown file
-	templates, err := parseMarkdownFile(filepath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error parsing markdown file: %v\n", err)
-		os.Exit(1)
-	}
-
-	if len(templates) == 0 {
-		fmt.Fprintf(os.Stderr, "No issues found in markdown file\n")
-		os.Exit(1)
-	}
-
 	ctx := rootCtx
 	createdIssues := []*types.Issue{}
-	failedIssues := []string{}
 
-	// Create each issue
+	// Build issue structs with labels and dependencies populated,
+	// then create them all via CreateIssues (single transaction).
+	var issues []*types.Issue
 	for _, template := range templates {
 		issue := &types.Issue{
 			Title:              template.Title,
@@ -342,22 +339,9 @@ func createIssuesFromMarkdown(_ *cobra.Command, filepath string) {
 			Priority:           template.Priority,
 			IssueType:          template.IssueType,
 			Assignee:           template.Assignee,
+			Labels:             template.Labels,
 		}
 
-		if err := store.CreateIssue(ctx, issue, actor); err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating issue '%s': %v\n", template.Title, err)
-			failedIssues = append(failedIssues, template.Title)
-			continue
-		}
-
-		// Add labels
-		for _, label := range template.Labels {
-			if err := store.AddLabel(ctx, issue.ID, label, actor); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to add label %s to %s: %v\n", label, issue.ID, err)
-			}
-		}
-
-		// Add dependencies
 		for _, depSpec := range template.Dependencies {
 			depSpec = strings.TrimSpace(depSpec)
 			if depSpec == "" {
@@ -367,12 +351,10 @@ func createIssuesFromMarkdown(_ *cobra.Command, filepath string) {
 			var depType types.DependencyType
 			var dependsOnID string
 
-			// Parse format: "type:id" or just "id" (defaults to "blocks")
 			if strings.Contains(depSpec, ":") {
 				parts := strings.SplitN(depSpec, ":", 2)
 				if len(parts) != 2 {
-					fmt.Fprintf(os.Stderr, "Warning: invalid dependency format '%s' for %s\n", depSpec, issue.ID)
-					continue
+					FatalError("invalid dependency format '%s' for issue '%s'", depSpec, template.Title)
 				}
 				depType = types.DependencyType(strings.TrimSpace(parts[0]))
 				dependsOnID = strings.TrimSpace(parts[1])
@@ -382,35 +364,28 @@ func createIssuesFromMarkdown(_ *cobra.Command, filepath string) {
 			}
 
 			if !depType.IsValid() {
-				fmt.Fprintf(os.Stderr, "Warning: invalid dependency type '%s' for %s\n", depType, issue.ID)
-				continue
+				FatalError("invalid dependency type '%s' for issue '%s'", depType, template.Title)
 			}
 
-			dep := &types.Dependency{
-				IssueID:     issue.ID,
+			// IssueID left empty — PersistDependencies defaults it to issue.ID
+			// after ID generation.
+			issue.Dependencies = append(issue.Dependencies, &types.Dependency{
 				DependsOnID: dependsOnID,
 				Type:        depType,
-			}
-			if err := store.AddDependency(ctx, dep, actor); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to add dependency %s -> %s: %v\n", issue.ID, dependsOnID, err)
-			}
+			})
 		}
 
-		createdIssues = append(createdIssues, issue)
+		issues = append(issues, issue)
 	}
 
-	// Schedule auto-flush
-	if len(createdIssues) > 0 {
-		markDirtyAndScheduleFlush()
+	if err := store.CreateIssues(ctx, issues, actor); err != nil {
+		FatalError("creating issues from markdown: %v", err)
 	}
-
-	// Report failures if any
-	if len(failedIssues) > 0 {
-		fmt.Fprintf(os.Stderr, "\n%s Failed to create %d issues:\n", ui.RenderFail("✗"), len(failedIssues))
-		for _, title := range failedIssues {
-			fmt.Fprintf(os.Stderr, "  - %s\n", title)
-		}
+	commitMsg := fmt.Sprintf("bd: create %d issue(s) from %s", len(templates), filepath)
+	if err := store.Commit(ctx, commitMsg); err != nil && !isDoltNothingToCommit(err) {
+		WarnError("failed to commit: %v", err)
 	}
+	createdIssues = append(createdIssues, issues...)
 
 	if jsonOutput {
 		outputJSON(createdIssues)

@@ -2,29 +2,193 @@
 package main
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
 	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/rpc"
-	"github.com/steveyegge/beads/internal/storage/sqlite"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
-	"github.com/steveyegge/beads/internal/utils"
 )
 
+// resolveIDWithRouting resolves a partial issue ID using prefix-based routing.
+// It returns the resolved full ID and the store that contains the issue.
+// If the issue routes to a different database, a routed store is returned
+// and must be closed by the caller via the returned cleanup function.
+// If the issue is in the local store, cleanup is a no-op.
+func resolveIDWithRouting(ctx context.Context, localStore storage.DoltStorage, id string) (resolvedID string, targetStore storage.DoltStorage, cleanup func(), err error) {
+	result, err := resolveAndGetIssueWithRouting(ctx, localStore, id)
+	if err != nil {
+		return "", nil, func() {}, fmt.Errorf("resolving issue ID %s: %w", id, err)
+	}
+	if result == nil || result.Issue == nil {
+		return "", nil, func() {}, fmt.Errorf("no issue found matching %q", id)
+	}
+	s := result.Store
+	if s == nil {
+		s = localStore
+	}
+	return result.ResolvedID, s, func() { result.Close() }, nil
+}
+
+// isChildOf returns true if childID is a hierarchical child of parentID.
+// For example, "bd-abc.1" is a child of "bd-abc", and "bd-abc.1.2" is a child of "bd-abc.1".
+func isChildOf(childID, parentID string) bool {
+	// A child ID has the format "parentID.N" or "parentID.N.M" etc.
+	// Use ParseHierarchicalID to get the actual parent
+	_, actualParentID, depth := types.ParseHierarchicalID(childID)
+	if depth == 0 {
+		return false // Not a hierarchical ID
+	}
+	// Check if the immediate parent matches
+	if actualParentID == parentID {
+		return true
+	}
+	// Also check if parentID is an ancestor (e.g., "bd-abc" is parent of "bd-abc.1.2")
+	return strings.HasPrefix(childID, parentID+".")
+}
+
+// warnIfCyclesExist checks for dependency cycles and prints a warning if found.
+func warnIfCyclesExist(s storage.DoltStorage) {
+	if s == nil {
+		return // Skip cycle check if store is not available
+	}
+	cycles, err := s.DetectCycles(rootCtx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Failed to check for cycles: %v\n", err)
+		return
+	}
+	if len(cycles) == 0 {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "\n%s Warning: Dependency cycle detected!\n", ui.RenderWarn("⚠"))
+	fmt.Fprintf(os.Stderr, "This can hide issues from the ready work list and cause confusion.\n\n")
+	fmt.Fprintf(os.Stderr, "Cycle path:\n")
+	for _, cycle := range cycles {
+		for j, issue := range cycle {
+			if j == 0 {
+				fmt.Fprintf(os.Stderr, "  %s", issue.ID)
+			} else {
+				fmt.Fprintf(os.Stderr, " → %s", issue.ID)
+			}
+		}
+		if len(cycle) > 0 {
+			fmt.Fprintf(os.Stderr, " → %s", cycle[0].ID)
+		}
+		fmt.Fprintf(os.Stderr, "\n")
+	}
+	fmt.Fprintf(os.Stderr, "\nRun 'bd dep cycles' for detailed analysis.\n\n")
+}
+
 var depCmd = &cobra.Command{
-	Use:     "dep",
+	Use:     "dep [issue-id]",
 	GroupID: "deps",
 	Short:   "Manage dependencies",
+	Long: `Manage dependencies between issues.
+
+When called with an issue ID and --blocks flag, creates a blocking dependency:
+  bd dep <blocker-id> --blocks <blocked-id>
+
+This is equivalent to:
+  bd dep add <blocked-id> <blocker-id>
+
+Examples:
+  bd dep bd-xyz --blocks bd-abc    # bd-xyz blocks bd-abc
+  bd dep add bd-abc bd-xyz         # Same as above (bd-abc depends on bd-xyz)`,
+	Args: cobra.MaximumNArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		blocksID, _ := cmd.Flags().GetString("blocks")
+
+		// If no args and no flags, show help
+		if len(args) == 0 && blocksID == "" {
+			_ = cmd.Help() // Help() always returns nil for cobra commands
+			return
+		}
+
+		// If --blocks flag is provided, create a blocking dependency
+		if blocksID != "" {
+			if len(args) != 1 {
+				FatalErrorRespectJSON("--blocks requires exactly one issue ID argument")
+			}
+			blockerID := args[0]
+
+			CheckReadonly("dep --blocks")
+
+			ctx := rootCtx
+			depType := "blocks"
+
+			// Resolve partial IDs with routing support
+			fromID, fromStore, fromCleanup, err := resolveIDWithRouting(ctx, store, blocksID)
+			if err != nil {
+				FatalErrorRespectJSON("%v", err)
+			}
+			defer fromCleanup()
+
+			toID, _, toCleanup, err := resolveIDWithRouting(ctx, store, blockerID)
+			if err != nil {
+				FatalErrorRespectJSON("%v", err)
+			}
+			defer toCleanup()
+
+			// Check for child→parent dependency anti-pattern
+			if isChildOf(fromID, toID) {
+				FatalErrorRespectJSON("cannot add dependency: %s is already a child of %s. Children inherit dependency on parent completion via hierarchy. Adding an explicit dependency would create a deadlock", fromID, toID)
+			}
+
+			// Direct mode - use the store that owns the dependent issue
+			dep := &types.Dependency{
+				IssueID:     fromID,
+				DependsOnID: toID,
+				Type:        types.DependencyType(depType),
+			}
+
+			if err := fromStore.AddDependency(ctx, dep, actor); err != nil {
+				FatalErrorRespectJSON("%v", err)
+			}
+
+			// Check for cycles after adding dependency
+			warnIfCyclesExist(fromStore)
+
+			if isEmbeddedMode() && fromStore != nil {
+				if _, err := fromStore.CommitPending(ctx, actor); err != nil {
+					FatalErrorRespectJSON("failed to commit: %v", err)
+				}
+			}
+
+			if jsonOutput {
+				outputJSON(map[string]interface{}{
+					"status":     "added",
+					"blocker_id": toID,
+					"blocked_id": fromID,
+					"type":       depType,
+				})
+				return
+			}
+
+			fmt.Printf("%s Added dependency: %s blocks %s\n",
+				ui.RenderPass("✓"), formatFeedbackIDParen(toID, lookupTitle(toID)), formatFeedbackIDParen(fromID, lookupTitle(fromID)))
+			return
+		}
+
+		// If we have an arg but no --blocks flag, show help
+		_ = cmd.Help() // Help() always returns nil for cobra commands
+	},
 }
 
 var depAddCmd = &cobra.Command{
 	Use:   "add [issue-id] [depends-on-id]",
 	Short: "Add a dependency",
 	Long: `Add a dependency between two issues.
+
+The depends-on-id can be provided as:
+  - A positional argument: bd dep add issue-123 issue-456
+  - A flag: bd dep add issue-123 --blocked-by issue-456
+  - A flag: bd dep add issue-123 --depends-on issue-456
+
+The --blocked-by and --depends-on flags are aliases and both mean "issue-123
+depends on (is blocked by) the specified issue."
 
 The depends-on-id can be:
   - A local issue ID (e.g., bd-xyz)
@@ -35,139 +199,118 @@ the external_projects config. They block the issue until the capability
 is "shipped" in the target project.
 
 Examples:
-  bd dep add bd-42 bd-41                              # Local dependency
+  bd dep add bd-42 bd-41                              # Positional args
+  bd dep add bd-42 --blocked-by bd-41                 # Flag syntax (same effect)
+  bd dep add bd-42 --depends-on bd-41                 # Alias (same effect)
   bd dep add gt-xyz external:beads:mol-run-assignee   # Cross-project dependency`,
-	Args: cobra.ExactArgs(2),
+	Args: func(cmd *cobra.Command, args []string) error {
+		blockedBy, _ := cmd.Flags().GetString("blocked-by")
+		dependsOn, _ := cmd.Flags().GetString("depends-on")
+		hasFlag := blockedBy != "" || dependsOn != ""
+
+		if hasFlag {
+			// If a flag is provided, we only need 1 positional arg (the dependent issue)
+			if len(args) < 1 {
+				return fmt.Errorf("requires at least 1 arg(s), only received %d", len(args))
+			}
+			if len(args) > 1 {
+				return fmt.Errorf("cannot use both positional depends-on-id and --blocked-by/--depends-on flag")
+			}
+			return nil
+		}
+		// No flag provided, need exactly 2 positional args
+		if len(args) != 2 {
+			return fmt.Errorf("requires 2 arg(s), only received %d (or use --blocked-by/--depends-on flag)", len(args))
+		}
+		return nil
+	},
 	Run: func(cmd *cobra.Command, args []string) {
 		CheckReadonly("dep add")
 		depType, _ := cmd.Flags().GetString("type")
 
+		// Get the dependency target from flag or positional arg
+		blockedBy, _ := cmd.Flags().GetString("blocked-by")
+		dependsOn, _ := cmd.Flags().GetString("depends-on")
+
+		var dependsOnArg string
+		if blockedBy != "" {
+			dependsOnArg = blockedBy
+		} else if dependsOn != "" {
+			dependsOnArg = dependsOn
+		} else {
+			dependsOnArg = args[1]
+		}
+
 		ctx := rootCtx
 
-		// Resolve partial IDs first
+		// Resolve partial IDs with routing support
 		var fromID, toID string
 
 		// Check if toID is an external reference (don't resolve it)
-		isExternalRef := strings.HasPrefix(args[1], "external:")
+		isExternalRef := strings.HasPrefix(dependsOnArg, "external:")
 
-		if daemonClient != nil {
-			resolveArgs := &rpc.ResolveIDArgs{ID: args[0]}
-			resp, err := daemonClient.ResolveID(resolveArgs)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error resolving issue ID %s: %v\n", args[0], err)
-				os.Exit(1)
-			}
-			if err := json.Unmarshal(resp.Data, &fromID); err != nil {
-				fmt.Fprintf(os.Stderr, "Error unmarshaling resolved ID: %v\n", err)
-				os.Exit(1)
-			}
+		fromID, fromStore, fromCleanup, err := resolveIDWithRouting(ctx, store, args[0])
+		if err != nil {
+			FatalErrorRespectJSON("%v", err)
+		}
+		defer fromCleanup()
 
-			if isExternalRef {
-				// External references are stored as-is
-				toID = args[1]
-				// Validate format: external:<project>:<capability>
-				if err := validateExternalRef(toID); err != nil {
-					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-					os.Exit(1)
-				}
-			} else {
-				resolveArgs = &rpc.ResolveIDArgs{ID: args[1]}
-				resp, err = daemonClient.ResolveID(resolveArgs)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error resolving dependency ID %s: %v\n", args[1], err)
-					os.Exit(1)
-				}
-				if err := json.Unmarshal(resp.Data, &toID); err != nil {
-					fmt.Fprintf(os.Stderr, "Error unmarshaling resolved ID: %v\n", err)
-					os.Exit(1)
-				}
+		if isExternalRef {
+			// External references are stored as-is
+			toID = dependsOnArg
+			// Validate format: external:<project>:<capability>
+			if err := validateExternalRef(toID); err != nil {
+				FatalErrorRespectJSON("%v", err)
 			}
 		} else {
-			var err error
-			fromID, err = utils.ResolvePartialID(ctx, store, args[0])
+			var toCleanup func()
+			toID, _, toCleanup, err = resolveIDWithRouting(ctx, store, dependsOnArg)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error resolving issue ID %s: %v\n", args[0], err)
-				os.Exit(1)
-			}
-
-			if isExternalRef {
-				// External references are stored as-is
-				toID = args[1]
-				// Validate format: external:<project>:<capability>
-				if err := validateExternalRef(toID); err != nil {
-					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-					os.Exit(1)
+				// Cross-prefix deps: if the target has a different prefix than
+				// the source, skip resolution and pass the raw ID through.
+				// The storage layer's isCrossPrefixDep() handles this correctly.
+				srcPrefix := types.ExtractPrefix(fromID)
+				tgtPrefix := types.ExtractPrefix(dependsOnArg)
+				if srcPrefix != "" && tgtPrefix != "" && srcPrefix != tgtPrefix {
+					toID = dependsOnArg
+				} else {
+					FatalErrorRespectJSON("resolving dependency ID %s: %v", dependsOnArg, err)
 				}
 			} else {
-				toID, err = utils.ResolvePartialID(ctx, store, args[1])
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error resolving dependency ID %s: %v\n", args[1], err)
-					os.Exit(1)
-				}
+				defer toCleanup()
 			}
 		}
 
-		// If daemon is running, use RPC
-		if daemonClient != nil {
-			depArgs := &rpc.DepAddArgs{
-				FromID:  fromID,
-				ToID:    toID,
-				DepType: depType,
-			}
-
-			resp, err := daemonClient.AddDependency(depArgs)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-
-			if jsonOutput {
-				fmt.Println(string(resp.Data))
-				return
-			}
-
-			fmt.Printf("%s Added dependency: %s depends on %s (%s)\n",
-				ui.RenderPass("✓"), args[0], args[1], depType)
-			return
+		// Check for child→parent dependency anti-pattern
+		// This creates a deadlock: child can't start (parent open), parent can't close (children not done)
+		if isChildOf(fromID, toID) {
+			FatalErrorRespectJSON("cannot add dependency: %s is already a child of %s. Children inherit dependency on parent completion via hierarchy. Adding an explicit dependency would create a deadlock", fromID, toID)
 		}
 
-		// Direct mode
+		// Validate dependency type
+		dt := types.DependencyType(depType)
+		if !dt.IsValid() {
+			FatalErrorRespectJSON("invalid dependency type %q: must be non-empty and at most 50 characters", depType)
+		}
+
+		// Direct mode - use the store that owns the dependent issue
 		dep := &types.Dependency{
 			IssueID:     fromID,
 			DependsOnID: toID,
-			Type:        types.DependencyType(depType),
+			Type:        dt,
 		}
 
-		if err := store.AddDependency(ctx, dep, actor); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+		if err := fromStore.AddDependency(ctx, dep, actor); err != nil {
+			FatalErrorRespectJSON("%v", err)
 		}
-
-		// Schedule auto-flush
-		markDirtyAndScheduleFlush()
 
 		// Check for cycles after adding dependency
-		cycles, err := store.DetectCycles(ctx)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: Failed to check for cycles: %v\n", err)
-		} else if len(cycles) > 0 {
-			fmt.Fprintf(os.Stderr, "\n%s Warning: Dependency cycle detected!\n", ui.RenderWarn("⚠"))
-			fmt.Fprintf(os.Stderr, "This can hide issues from the ready work list and cause confusion.\n\n")
-			fmt.Fprintf(os.Stderr, "Cycle path:\n")
-			for _, cycle := range cycles {
-				for j, issue := range cycle {
-					if j == 0 {
-						fmt.Fprintf(os.Stderr, "  %s", issue.ID)
-					} else {
-						fmt.Fprintf(os.Stderr, " → %s", issue.ID)
-					}
-				}
-				if len(cycle) > 0 {
-					fmt.Fprintf(os.Stderr, " → %s", cycle[0].ID)
-				}
-				fmt.Fprintf(os.Stderr, "\n")
+		warnIfCyclesExist(fromStore)
+
+		if isEmbeddedMode() && fromStore != nil {
+			if _, err := fromStore.CommitPending(ctx, actor); err != nil {
+				FatalErrorRespectJSON("failed to commit: %v", err)
 			}
-			fmt.Fprintf(os.Stderr, "\nRun 'bd dep cycles' for detailed analysis.\n\n")
 		}
 
 		if jsonOutput {
@@ -181,91 +324,250 @@ Examples:
 		}
 
 		fmt.Printf("%s Added dependency: %s depends on %s (%s)\n",
-			ui.RenderPass("✓"), fromID, toID, depType)
+			ui.RenderPass("✓"), formatFeedbackIDParen(fromID, lookupTitle(fromID)), formatFeedbackIDParen(toID, lookupTitle(toID)), depType)
+	},
+}
+
+var depListCmd = &cobra.Command{
+	Use:   "list [issue-id...]",
+	Short: "List dependencies or dependents of one or more issues",
+	Long: `List dependencies or dependents of one or more issues with optional type filtering.
+
+By default shows dependencies (what issues depend on). Use --direction to control:
+  - down: Show dependencies (what this issue depends on) - default
+  - up:   Show dependents (what depends on this issue)
+
+Multiple IDs can be provided for batch dep listing. With --json, the output
+is a flat array of dependency records across all requested issues.
+
+Use --type to filter by dependency type (e.g., tracks, blocks, parent-child).
+
+Examples:
+  bd dep list gt-abc                     # Show what gt-abc depends on
+  bd dep list gt-abc gt-def              # Batch: deps for both issues
+  bd dep list gt-abc --direction=up      # Show what depends on gt-abc
+  bd dep list gt-abc --direction=up -t tracks  # Show what tracks gt-abc (convoy tracking)`,
+	Args: cobra.MinimumNArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		ctx := rootCtx
+		direction, _ := cmd.Flags().GetString("direction")
+		typeFilter, _ := cmd.Flags().GetString("type")
+		if direction == "" {
+			direction = "down"
+		}
+
+		// Resolve all IDs and group by store.
+		type resolvedID struct {
+			fullID string
+			store  storage.DoltStorage
+			result *RoutedResult
+		}
+		var resolved []resolvedID
+		for _, arg := range args {
+			routedResult, err := resolveAndGetIssueWithRouting(ctx, store, arg)
+			if err != nil {
+				FatalErrorRespectJSON("resolving %s: %v", arg, err)
+			}
+			if routedResult == nil || routedResult.Issue == nil {
+				FatalErrorRespectJSON("no issue found: %s", arg)
+			}
+			depStore := store
+			if routedResult.Routed && routedResult.Store != nil {
+				depStore = routedResult.Store
+			}
+			resolved = append(resolved, resolvedID{
+				fullID: routedResult.ResolvedID,
+				store:  depStore,
+				result: routedResult,
+			})
+		}
+		defer func() {
+			for _, r := range resolved {
+				if r.result != nil {
+					r.result.Close()
+				}
+			}
+		}()
+
+		// Batch path: if all IDs route to the same store and direction
+		// is "down", use GetDependencyRecordsForIssues for one query.
+		if len(resolved) > 1 && direction == "down" {
+			allSameStore := true
+			firstStore := resolved[0].store
+			for _, r := range resolved[1:] {
+				if r.store != firstStore {
+					allSameStore = false
+					break
+				}
+			}
+			if allSameStore {
+				ids := make([]string, len(resolved))
+				for i, r := range resolved {
+					ids[i] = r.fullID
+				}
+				depMap, err := firstStore.GetDependencyRecordsForIssues(ctx, ids)
+				if err == nil {
+					// Flatten and filter.
+					var allDeps []*types.Dependency
+					for _, id := range ids {
+						for _, dep := range depMap[id] {
+							if typeFilter == "" || string(dep.Type) == typeFilter {
+								allDeps = append(allDeps, dep)
+							}
+						}
+					}
+					if jsonOutput {
+						if allDeps == nil {
+							allDeps = []*types.Dependency{}
+						}
+						outputJSON(allDeps)
+						return
+					}
+					// Human-readable output grouped by issue.
+					for _, id := range ids {
+						deps := depMap[id]
+						if len(deps) == 0 {
+							fmt.Printf("\n%s has no dependencies\n", id)
+							continue
+						}
+						fmt.Printf("\n%s %s depends on:\n\n", ui.RenderAccent("📋"), id)
+						for _, dep := range deps {
+							if typeFilter != "" && string(dep.Type) != typeFilter {
+								continue
+							}
+							fmt.Printf("  %s via %s\n", dep.DependsOnID, dep.Type)
+						}
+					}
+					fmt.Println()
+					return
+				}
+				// Fall through to per-ID path on error.
+			}
+		}
+
+		// Per-ID path (single ID or mixed stores or "up" direction).
+		var allIssues []*types.IssueWithDependencyMetadata
+		for _, r := range resolved {
+			var issues []*types.IssueWithDependencyMetadata
+			var err error
+			if direction == "up" {
+				issues, err = r.store.GetDependentsWithMetadata(ctx, r.fullID)
+			} else {
+				issues, err = r.store.GetDependenciesWithMetadata(ctx, r.fullID)
+			}
+			if err != nil {
+				FatalErrorRespectJSON("%v", err)
+			}
+			if typeFilter != "" {
+				var filtered []*types.IssueWithDependencyMetadata
+				for _, iss := range issues {
+					if string(iss.DependencyType) == typeFilter {
+						filtered = append(filtered, iss)
+					}
+				}
+				issues = filtered
+			}
+			allIssues = append(allIssues, issues...)
+		}
+
+		if jsonOutput {
+			if allIssues == nil {
+				allIssues = []*types.IssueWithDependencyMetadata{}
+			}
+			outputJSON(allIssues)
+			return
+		}
+
+		if len(allIssues) == 0 {
+			if len(resolved) == 1 {
+				if direction == "up" {
+					fmt.Printf("\nNo issues depend on %s\n", resolved[0].fullID)
+				} else {
+					fmt.Printf("\n%s has no dependencies\n", resolved[0].fullID)
+				}
+			} else {
+				fmt.Println("\nNo dependencies found")
+			}
+			return
+		}
+
+		for _, iss := range allIssues {
+			var idStr string
+			switch iss.Status {
+			case types.StatusOpen:
+				idStr = ui.StatusOpenStyle.Render(iss.ID)
+			case types.StatusInProgress:
+				idStr = ui.StatusInProgressStyle.Render(iss.ID)
+			case types.StatusBlocked:
+				idStr = ui.StatusBlockedStyle.Render(iss.ID)
+			case types.StatusClosed:
+				idStr = ui.StatusClosedStyle.Render(iss.ID)
+			default:
+				idStr = iss.ID
+			}
+			fmt.Printf("  %s: %s [P%d] (%s) via %s\n",
+				idStr, iss.Title, iss.Priority, iss.Status, iss.DependencyType)
+		}
+		fmt.Println()
 	},
 }
 
 var depRemoveCmd = &cobra.Command{
-	Use:   "remove [issue-id] [depends-on-id]",
-	Short: "Remove a dependency",
-	Args:  cobra.ExactArgs(2),
+	Use:     "remove [issue-id] [depends-on-id]",
+	Aliases: []string{"rm"},
+	Short:   "Remove a dependency",
+	Args:    cobra.ExactArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
 		CheckReadonly("dep remove")
 		ctx := rootCtx
-		
-		// Resolve partial IDs first
+
+		// Resolve partial IDs with routing support
 		var fromID, toID string
-		if daemonClient != nil {
-			resolveArgs := &rpc.ResolveIDArgs{ID: args[0]}
-			resp, err := daemonClient.ResolveID(resolveArgs)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error resolving issue ID %s: %v\n", args[0], err)
-				os.Exit(1)
-			}
-			if err := json.Unmarshal(resp.Data, &fromID); err != nil {
-				fmt.Fprintf(os.Stderr, "Error unmarshaling resolved ID: %v\n", err)
-				os.Exit(1)
-			}
-			
-			resolveArgs = &rpc.ResolveIDArgs{ID: args[1]}
-			resp, err = daemonClient.ResolveID(resolveArgs)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error resolving dependency ID %s: %v\n", args[1], err)
-				os.Exit(1)
-			}
-			if err := json.Unmarshal(resp.Data, &toID); err != nil {
-				fmt.Fprintf(os.Stderr, "Error unmarshaling resolved ID: %v\n", err)
-				os.Exit(1)
+		fromID, fromStore, fromCleanup, err := resolveIDWithRouting(ctx, store, args[0])
+		if err != nil {
+			FatalErrorRespectJSON("%v", err)
+		}
+		defer fromCleanup()
+
+		// Check if toID is an external reference (don't resolve it)
+		isExternalRef := strings.HasPrefix(args[1], "external:")
+
+		if isExternalRef {
+			toID = args[1]
+			if err := validateExternalRef(toID); err != nil {
+				FatalErrorRespectJSON("%v", err)
 			}
 		} else {
-			var err error
-			fromID, err = utils.ResolvePartialID(ctx, store, args[0])
+			var toCleanup func()
+			toID, _, toCleanup, err = resolveIDWithRouting(ctx, store, args[1])
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error resolving issue ID %s: %v\n", args[0], err)
-				os.Exit(1)
-			}
-			
-			toID, err = utils.ResolvePartialID(ctx, store, args[1])
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error resolving dependency ID %s: %v\n", args[1], err)
-				os.Exit(1)
+				// Cross-prefix deps: if the target has a different prefix than
+				// the source, skip resolution and pass the raw ID through.
+				srcPrefix := types.ExtractPrefix(fromID)
+				tgtPrefix := types.ExtractPrefix(args[1])
+				if srcPrefix != "" && tgtPrefix != "" && srcPrefix != tgtPrefix {
+					toID = args[1]
+				} else {
+					FatalErrorRespectJSON("resolving dependency ID %s: %v", args[1], err)
+				}
+			} else {
+				defer toCleanup()
 			}
 		}
 
-		// If daemon is running, use RPC
-		if daemonClient != nil {
-			depArgs := &rpc.DepRemoveArgs{
-				FromID: fromID,
-				ToID:   toID,
-			}
-
-			resp, err := daemonClient.RemoveDependency(depArgs)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-
-			if jsonOutput {
-				fmt.Println(string(resp.Data))
-				return
-			}
-
-			fmt.Printf("%s Removed dependency: %s no longer depends on %s\n",
-				ui.RenderPass("✓"), fromID, toID)
-			return
-		}
-
-		// Direct mode
+		// Direct mode - use the store that owns the dependent issue
 		fullFromID := fromID
 		fullToID := toID
-		
-		if err := store.RemoveDependency(ctx, fullFromID, fullToID, actor); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+
+		if err := fromStore.RemoveDependency(ctx, fullFromID, fullToID, actor); err != nil {
+			FatalErrorRespectJSON("%v", err)
 		}
 
-		// Schedule auto-flush
-		markDirtyAndScheduleFlush()
+		if isEmbeddedMode() && fromStore != nil {
+			if _, err := fromStore.CommitPending(ctx, actor); err != nil {
+				FatalErrorRespectJSON("failed to commit: %v", err)
+			}
+		}
 
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
@@ -277,7 +579,7 @@ var depRemoveCmd = &cobra.Command{
 		}
 
 		fmt.Printf("%s Removed dependency: %s no longer depends on %s\n",
-			ui.RenderPass("✓"), fullFromID, fullToID)
+			ui.RenderPass("✓"), formatFeedbackIDParen(fullFromID, lookupTitle(fullFromID)), formatFeedbackIDParen(fullToID, lookupTitle(fullToID)))
 	},
 }
 
@@ -300,38 +602,12 @@ Examples:
 	Run: func(cmd *cobra.Command, args []string) {
 		ctx := rootCtx
 
-		// Resolve partial ID first
-		var fullID string
-		if daemonClient != nil {
-			resolveArgs := &rpc.ResolveIDArgs{ID: args[0]}
-			resp, err := daemonClient.ResolveID(resolveArgs)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error resolving issue ID %s: %v\n", args[0], err)
-				os.Exit(1)
-			}
-			if err := json.Unmarshal(resp.Data, &fullID); err != nil {
-				fmt.Fprintf(os.Stderr, "Error unmarshaling resolved ID: %v\n", err)
-				os.Exit(1)
-			}
-		} else {
-			var err error
-			fullID, err = utils.ResolvePartialID(ctx, store, args[0])
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", args[0], err)
-				os.Exit(1)
-			}
+		// Resolve partial ID with routing support
+		fullID, treeStore, treeCleanup, err := resolveIDWithRouting(ctx, store, args[0])
+		if err != nil {
+			FatalErrorRespectJSON("%v", err)
 		}
-
-		// If daemon is running but doesn't support this command, use direct storage
-		if daemonClient != nil && store == nil {
-			var err error
-			store, err = sqlite.New(rootCtx, dbPath)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
-				os.Exit(1)
-			}
-			defer func() { _ = store.Close() }()
-		}
+		defer treeCleanup()
 
 		showAllPaths, _ := cmd.Flags().GetBool("show-all-paths")
 		maxDepth, _ := cmd.Flags().GetInt("max-depth")
@@ -339,6 +615,13 @@ Examples:
 		direction, _ := cmd.Flags().GetString("direction")
 		statusFilter, _ := cmd.Flags().GetString("status")
 		formatStr, _ := cmd.Flags().GetString("format")
+		// Handle --format json: the local --format flag shadows the hidden
+		// persistent --format on rootCmd, so "json" arrives here instead of
+		// setting jsonOutput via PersistentPreRun. Route it explicitly.
+		if strings.EqualFold(formatStr, "json") {
+			jsonOutput = true
+			formatStr = ""
+		}
 
 		// Handle --direction flag (takes precedence over deprecated --reverse)
 		if direction == "" && reverse {
@@ -349,32 +632,27 @@ Examples:
 
 		// Validate direction
 		if direction != "down" && direction != "up" && direction != "both" {
-			fmt.Fprintf(os.Stderr, "Error: --direction must be 'down', 'up', or 'both'\n")
-			os.Exit(1)
+			FatalErrorRespectJSON("--direction must be 'down', 'up', or 'both'")
 		}
 
 		if maxDepth < 1 {
-			fmt.Fprintf(os.Stderr, "Error: --max-depth must be >= 1\n")
-			os.Exit(1)
+			FatalErrorRespectJSON("--max-depth must be >= 1")
 		}
 
 		// For "both" direction, we need to fetch both trees and merge them
 		var tree []*types.TreeNode
-		var err error
 
 		if direction == "both" {
 			// Get dependencies (down) - what blocks this issue
-			downTree, err := store.GetDependencyTree(ctx, fullID, maxDepth, showAllPaths, false)
+			downTree, err := treeStore.GetDependencyTree(ctx, fullID, maxDepth, showAllPaths, false)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				FatalErrorRespectJSON("%v", err)
 			}
 
 			// Get dependents (up) - what this issue blocks
-			upTree, err := store.GetDependencyTree(ctx, fullID, maxDepth, showAllPaths, true)
+			upTree, err := treeStore.GetDependencyTree(ctx, fullID, maxDepth, showAllPaths, true)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				FatalErrorRespectJSON("%v", err)
 			}
 
 			// Merge: root appears once, dependencies below, dependents above
@@ -382,10 +660,9 @@ Examples:
 			// then root, then dependencies
 			tree = mergeBidirectionalTrees(downTree, upTree, fullID)
 		} else {
-			tree, err = store.GetDependencyTree(ctx, fullID, maxDepth, showAllPaths, direction == "up")
+			tree, err = treeStore.GetDependencyTree(ctx, fullID, maxDepth, showAllPaths, direction == "up")
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				FatalErrorRespectJSON("%v", err)
 			}
 		}
 
@@ -394,7 +671,7 @@ Examples:
 			tree = filterTreeByStatus(tree, types.Status(statusFilter))
 		}
 
-		// Handle mermaid format
+		// Handle format presets (json handled earlier, near flag read)
 		if formatStr == "mermaid" {
 			outputMermaidTree(tree, args[0])
 			return
@@ -440,22 +717,11 @@ var depCyclesCmd = &cobra.Command{
 	Use:   "cycles",
 	Short: "Detect dependency cycles",
 	Run: func(cmd *cobra.Command, args []string) {
-		// If daemon is running but doesn't support this command, use direct storage
-		if daemonClient != nil && store == nil {
-			var err error
-			store, err = sqlite.New(rootCtx, dbPath)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: failed to open database: %v\n", err)
-				os.Exit(1)
-			}
-			defer func() { _ = store.Close() }()
-		}
 
 		ctx := rootCtx
 		cycles, err := store.DetectCycles(ctx)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			FatalErrorRespectJSON("%v", err)
 		}
 
 		if jsonOutput {
@@ -546,6 +812,8 @@ type treeRenderer struct {
 	maxDepth int
 	// Direction of traversal
 	direction string
+	// Whether the root node has open children (i.e., is blocked)
+	rootBlocked bool
 }
 
 // renderTree renders the tree with proper box-drawing connectors
@@ -575,6 +843,18 @@ func renderTree(tree []*types.TreeNode, maxDepth int, direction string) {
 
 	if root == nil && len(tree) > 0 {
 		root = tree[0]
+	}
+
+	// Check if root has open children (meaning it's blocked, not ready)
+	if root != nil {
+		hasOpenChildren := false
+		for _, child := range children[root.ID] {
+			if child.Status == types.StatusOpen || child.Status == types.StatusInProgress {
+				hasOpenChildren = true
+				break
+			}
+		}
+		r.rootBlocked = hasOpenChildren
 	}
 
 	// Render recursively from root
@@ -616,7 +896,7 @@ func (r *treeRenderer) renderNode(node *types.TreeNode, children map[string][]*t
 	r.seen[node.ID] = true
 
 	// Format the node line
-	line := formatTreeNode(node)
+	line := formatTreeNode(node, depth == 0 && r.rootBlocked)
 
 	// Add truncation warning if at max depth and has children
 	if node.Truncated || (depth == r.maxDepth && len(children[node.ID]) > 0) {
@@ -638,7 +918,23 @@ func (r *treeRenderer) renderNode(node *types.TreeNode, children map[string][]*t
 }
 
 // formatTreeNode formats a single tree node with status, ready indicator, etc.
-func formatTreeNode(node *types.TreeNode) string {
+// isBlocked indicates the node has open blocking dependencies and should not show [READY].
+func formatTreeNode(node *types.TreeNode, isBlocked bool) string {
+	// Handle external dependencies specially
+	if IsExternalRef(node.ID) {
+		// External deps use their title directly which includes the status indicator
+		var idStr string
+		switch node.Status {
+		case types.StatusClosed:
+			idStr = ui.StatusClosedStyle.Render(node.Title)
+		case types.StatusBlocked:
+			idStr = ui.StatusBlockedStyle.Render(node.Title)
+		default:
+			idStr = node.Title
+		}
+		return fmt.Sprintf("%s (external)", idStr)
+	}
+
 	// Color the ID based on status
 	var idStr string
 	switch node.Status {
@@ -658,11 +954,13 @@ func formatTreeNode(node *types.TreeNode) string {
 	line := fmt.Sprintf("%s: %s [P%d] (%s)",
 		idStr, node.Title, node.Priority, node.Status)
 
-	// Add READY indicator for open issues (those that could be worked on)
-	// An issue is ready if it's open and has no blocking dependencies
-	// (In the tree view, depth 0 with status open implies ready in the "down" direction)
+	// Add READY/BLOCKED indicator for root node
 	if node.Status == types.StatusOpen && node.Depth == 0 {
-		line += " " + ui.PassStyle.Bold(true).Render("[READY]")
+		if isBlocked {
+			line += " " + ui.FailStyle.Bold(true).Render("[BLOCKED]")
+		} else {
+			line += " " + ui.PassStyle.Bold(true).Render("[READY]")
+		}
 	}
 
 	return line
@@ -809,10 +1107,12 @@ func ParseExternalRef(ref string) (project, capability string) {
 }
 
 func init() {
-	depAddCmd.Flags().StringP("type", "t", "blocks", "Dependency type (blocks|related|parent-child|discovered-from)")
-	// Note: --json flag is defined as a persistent flag in main.go, not here
+	// dep command shorthand flag
+	depCmd.Flags().StringP("blocks", "b", "", "Issue ID that this issue blocks (shorthand for: bd dep add <blocked> <blocker>)")
 
-	// Note: --json flag is defined as a persistent flag in main.go, not here
+	depAddCmd.Flags().StringP("type", "t", "blocks", "Dependency type (blocks|tracks|related|parent-child|discovered-from|until|caused-by|validates|relates-to|supersedes)")
+	depAddCmd.Flags().String("blocked-by", "", "Issue ID that blocks the first issue (alternative to positional arg)")
+	depAddCmd.Flags().String("depends-on", "", "Issue ID that the first issue depends on (alias for --blocked-by)")
 
 	depTreeCmd.Flags().Bool("show-all-paths", false, "Show all paths to nodes (no deduplication for diamond dependencies)")
 	depTreeCmd.Flags().IntP("max-depth", "d", 50, "Maximum tree depth to display (safety limit)")
@@ -820,12 +1120,21 @@ func init() {
 	depTreeCmd.Flags().String("direction", "", "Tree direction: 'down' (dependencies), 'up' (dependents), or 'both'")
 	depTreeCmd.Flags().String("status", "", "Filter to only show issues with this status (open, in_progress, blocked, deferred, closed)")
 	depTreeCmd.Flags().String("format", "", "Output format: 'mermaid' for Mermaid.js flowchart")
-	// Note: --json flag is defined as a persistent flag in main.go, not here
+	// Note: --type flag intentionally omitted from depTreeCmd — TreeNode lacks
+	// dependency type info so filtering is not possible. Use 'bd dep list --type' instead.
 
-	// Note: --json flag is defined as a persistent flag in main.go, not here
+	depListCmd.Flags().String("direction", "down", "Direction: 'down' (dependencies), 'up' (dependents)")
+	depListCmd.Flags().StringP("type", "t", "", "Filter by dependency type (e.g., tracks, blocks, parent-child)")
+
+	// Issue ID completions for dep subcommands
+	depAddCmd.ValidArgsFunction = issueIDCompletion
+	depRemoveCmd.ValidArgsFunction = issueIDCompletion
+	depListCmd.ValidArgsFunction = issueIDCompletion
+	depTreeCmd.ValidArgsFunction = issueIDCompletion
 
 	depCmd.AddCommand(depAddCmd)
 	depCmd.AddCommand(depRemoveCmd)
+	depCmd.AddCommand(depListCmd)
 	depCmd.AddCommand(depTreeCmd)
 	depCmd.AddCommand(depCyclesCmd)
 	rootCmd.AddCommand(depCmd)

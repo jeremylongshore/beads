@@ -62,7 +62,7 @@ func EnsureFile() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(filepath.Dir(p), 0750); err != nil {
+	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
 		return "", fmt.Errorf("failed to create .beads directory: %w", err)
 	}
 	_, statErr := os.Stat(p)
@@ -110,7 +110,7 @@ func Append(e *Entry) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to open interactions log: %w", err)
 	}
-	defer func() { _ = f.Close() }()
+	defer func() { _ = f.Close() }() // Best effort: file close in defer after flush
 
 	bw := bufio.NewWriter(f)
 	enc := json.NewEncoder(bw)
@@ -123,6 +123,30 @@ func Append(e *Entry) (string, error) {
 	}
 
 	return e.ID, nil
+}
+
+// LogFieldChange logs a field change (status, assignee, priority, etc.) to the
+// audit log. This survives Dolt GC flatten, which destroys commit history.
+// Best-effort: errors are silently ignored so audit logging never blocks operations.
+// Optional reason is included when non-empty (e.g., close reason, cleanup rule).
+func LogFieldChange(issueID, field, oldValue, newValue, actor, reason string) {
+	if oldValue == newValue {
+		return
+	}
+	extra := map[string]any{
+		"field":     field,
+		"old_value": oldValue,
+		"new_value": newValue,
+	}
+	if reason != "" {
+		extra["reason"] = reason
+	}
+	_, _ = Append(&Entry{
+		Kind:    "field_change",
+		IssueID: issueID,
+		Actor:   actor,
+		Extra:   extra,
+	})
 }
 
 func newID() (string, error) {

@@ -4,14 +4,123 @@ Common issues and solutions for bd users.
 
 ## Table of Contents
 
+- [Debug Environment Variables](#debug-environment-variables)
 - [Installation Issues](#installation-issues)
 - [Antivirus False Positives](#antivirus-false-positives)
 - [Database Issues](#database-issues)
+  - [Circuit breaker: "server appears down, failing fast"](#circuit-breaker-server-appears-down-failing-fast)
+  - [Connection failures after upgrading from pre-Dolt versions](#connection-failures-after-upgrading-from-pre-dolt-versions)
 - [Git and Sync Issues](#git-and-sync-issues)
 - [Ready Work and Dependencies](#ready-work-and-dependencies)
 - [Performance Issues](#performance-issues)
 - [Agent-Specific Issues](#agent-specific-issues)
 - [Platform-Specific Issues](#platform-specific-issues)
+
+## Debug Environment Variables
+
+bd supports several environment variables for debugging specific subsystems. Enable these when troubleshooting issues or when requested by maintainers.
+
+### Available Debug Variables
+
+| Variable | Purpose | Output Location | Usage |
+|----------|---------|----------------|-------|
+| `BD_DEBUG` | General debug logging | stderr | Set to any value to enable |
+| `BD_DEBUG_RPC` | RPC communication between CLI and Dolt server | stderr | Set to `1` or `true` |
+| `BD_DEBUG_SYNC` | Sync and import timestamp protection | stderr | Set to any value to enable |
+| `BD_DEBUG_ROUTING` | Issue routing and multi-repo resolution | stderr | Set to any value to enable |
+| `BD_DEBUG_FRESHNESS` | Database file replacement detection | server logs | Set to any value to enable |
+
+### Usage Examples
+
+**General debugging:**
+```bash
+# Enable all general debug logging
+export BD_DEBUG=1
+bd ready
+```
+
+**RPC communication issues:**
+```bash
+# Debug Dolt server communication
+export BD_DEBUG_RPC=1
+bd list
+
+# Example output:
+# [RPC DEBUG] Connecting to Dolt server
+# [RPC DEBUG] Sent request: list (correlation_id=abc123)
+# [RPC DEBUG] Received response: 200 OK
+```
+
+**Sync conflicts:**
+```bash
+# Debug timestamp protection during sync
+export BD_DEBUG_SYNC=1
+bd dolt push
+
+# Example output:
+# [debug] Protected bd-123: local=2024-01-20T10:00:00Z >= incoming=2024-01-20T09:55:00Z
+```
+
+**Routing issues:**
+```bash
+# Debug issue routing in multi-repo setups
+export BD_DEBUG_ROUTING=1
+bd create "Test issue" --rig=planning
+
+# Example output:
+# [routing] Rig "planning" -> prefix plan, path /path/to/planning-repo (townRoot=/path/to/town)
+# [routing] ID plan-123 matched prefix plan -> /path/to/planning-repo/beads
+```
+
+**Database reconnection issues:**
+```bash
+# Debug database file replacement detection
+export BD_DEBUG_FRESHNESS=1
+bd dolt start
+
+# Example output:
+# [freshness] FreshnessChecker: inode changed 27548143 -> 7945906
+# [freshness] FreshnessChecker: triggering reconnection
+# [freshness] Database file replaced, reconnection triggered
+
+# Or check server logs
+tail -f .beads/dolt/sql-server.log | grep freshness
+```
+
+**Multiple debug flags:**
+```bash
+# Enable multiple subsystems
+export BD_DEBUG=1
+export BD_DEBUG_RPC=1
+export BD_DEBUG_FRESHNESS=1
+bd dolt start
+```
+
+### Tips
+
+- **Disable after debugging**: Debug logging can be verbose. Disable by unsetting the variable:
+  ```bash
+  unset BD_DEBUG
+  unset BD_DEBUG_RPC
+  # etc.
+  ```
+
+- **Capture debug output**: Redirect stderr to a file for analysis:
+  ```bash
+  BD_DEBUG=1 bd dolt push 2> debug.log
+  ```
+
+- **Server logs**: `BD_DEBUG_FRESHNESS` output goes to server logs, not stderr:
+  ```bash
+  # View Dolt server logs
+  tail -f .beads/dolt/sql-server.log
+  ```
+
+- **When filing bug reports**: Include relevant debug output to help maintainers diagnose issues faster.
+
+### Related Documentation
+
+- [ROUTING.md](ROUTING.md) - Multi-repo routing configuration
 
 ## Installation Issues
 
@@ -93,11 +202,7 @@ If you installed via Homebrew, this shouldn't be necessary as the formula alread
 
 **Solutions**:
 
-1. **Add bd to antivirus exclusions** (recommended):
-   - Add the bd installation directory to your antivirus exclusion list
-   - This is safe - beads is open source and checksums are provided
-
-2. **Verify file integrity before excluding**:
+1. **Verify file integrity first**:
    ```bash
    # Windows PowerShell
    Get-FileHash bd.exe -Algorithm SHA256
@@ -106,6 +211,10 @@ If you installed via Homebrew, this shouldn't be necessary as the formula alread
    shasum -a 256 bd
    ```
    Compare with checksums from the [GitHub release page](https://github.com/steveyegge/beads/releases)
+
+2. **Add bd to antivirus exclusions only after verification**:
+   - Add the bd installation directory to your antivirus exclusion list
+   - Keep antivirus enabled for everything else
 
 3. **Report the false positive**:
    - Help improve detection by reporting to your antivirus vendor
@@ -119,20 +228,96 @@ If you installed via Homebrew, this shouldn't be necessary as the formula alread
 
 ## Database Issues
 
+### Port conflicts with multiple projects
+
+**Symptom:** Running `bd init` or `bd` commands in a second project fails or connects to the wrong database. Multiple `dolt sql-server` processes are running.
+
+**Cause:** By default, each beads project starts its own Dolt server. On machines with multiple projects, this can cause port conflicts or resource waste.
+
+**Fix:** Enable shared server mode so all projects use a single Dolt server:
+
+```bash
+# Option 1: Machine-wide (add to ~/.bashrc or ~/.zshrc)
+export BEADS_DOLT_SHARED_SERVER=1
+
+# Option 2: Per-project
+cd ~/project1 && bd dolt set shared-server true
+cd ~/project2 && bd dolt set shared-server true
+```
+
+After enabling, existing projects may need `bd init --force -q` to create their database on the shared server.
+
+**Verify:** `bd dolt status` from any project should show the same PID, port 3308, and `~/.beads/shared-server/` as the data directory.
+
+### `bd` shows 0 issues but the database has data
+
+**Symptom:** All `bd` commands return empty results. `bd list` shows nothing.
+
+**Cause:** Your `bd` may be connecting to a different Dolt server or database than expected. Before the version including the shadow DB fix (see [CHANGELOG](../CHANGELOG.md)), `bd` unconditionally ran `CREATE DATABASE IF NOT EXISTS` on every connection, which could create an empty shadow database on the wrong server.
+
+**Diagnosis:**
+
+```bash
+# Check what server bd is connecting to
+cat .beads/metadata.json | grep -E "dolt_mode|dolt_server"
+
+# Check if the database exists on the expected server
+dolt sql -q "SHOW DATABASES" --host 127.0.0.1 --port 3307
+
+# Query your data directly to confirm it exists
+cd /path/to/your/dolt/data/beads_myproject
+dolt sql -q "SELECT COUNT(*) FROM issues"
+
+# Run diagnostics
+bd doctor --server
+```
+
+**Fix:**
+
+1. Upgrade `bd` to a version including the shadow DB fix (see [CHANGELOG](../CHANGELOG.md))
+2. Ensure your Dolt server is running from the correct data directory
+3. Verify `metadata.json` points to the right server and port
+4. If a stale `.beads/dolt/` directory exists alongside server mode, remove it:
+   ```bash
+   rm -rf .beads/dolt/
+   ```
+
+### Configured server unreachable (auto-start disabled)
+
+**Symptom (after shadow DB fix):** `bd` returns "database not found on Dolt server" when the configured server is down.
+
+**Cause:** When `metadata.json` has an explicit `dolt_server_port`, auto-start is intentionally disabled. Starting a different server would create a shadow database.
+
+**Fix:**
+
+```bash
+# Start your configured Dolt server
+bd dolt start
+
+# Or start manually with the correct data directory
+dolt sql-server --host 127.0.0.1 --port 3307 --data-dir /path/to/your/dolt/data
+```
+
+If you want auto-start behavior, remove `dolt_server_port` from `.beads/metadata.json`.
+
 ### `database is locked`
 
-Another bd process is accessing the database, or SQLite didn't close properly. Solutions:
+Another bd process is accessing the database. Solutions:
 
 ```bash
 # Find and kill hanging processes
 ps aux | grep bd
 kill <pid>
 
-# Remove lock files (safe if no bd processes running)
-rm .beads/*.db-journal .beads/*.db-wal .beads/*.db-shm
+# WARNING: Do NOT remove files inside .dolt/ directories (including noms/LOCK).
+# These are Dolt-internal files — removing them WILL cause unrecoverable
+# data corruption. Dolt manages these files itself.
+
+# For server mode: restart the Dolt server
+# (server mode handles concurrent access natively)
 ```
 
-**Note**: bd uses a pure Go SQLite driver (`modernc.org/sqlite`) for better portability. Under extreme concurrent load (100+ simultaneous operations), you may see "database is locked" errors. This is a known limitation of the pure Go implementation and does not affect normal usage. For very high concurrency scenarios, consider using the CGO-enabled driver or PostgreSQL (planned for future release).
+**Note**: For high-concurrency scenarios (multiple agents), use Dolt server mode (`bd dolt set mode server`) which handles concurrent access natively via `dolt sql-server`.
 
 ### `bd init` fails with "directory not empty"
 
@@ -149,35 +334,31 @@ bd init
 
 ### `failed to import: issue already exists`
 
-You're trying to import issues that conflict with existing ones. Options:
+You're trying to bootstrap a database with issues that conflict with existing ones. Options:
 
 ```bash
-# Skip existing issues (only import new ones)
-bd import -i issues.jsonl --skip-existing
-
-# Or clear database and re-import everything
-rm .beads/*.db
-bd import -i .beads/issues.jsonl
+# Clear database and re-initialize from an export
+rm -rf .beads/dolt
+bd init --from-jsonl
 ```
 
 ### Import fails with missing parent errors
 
-If you see errors like `parent issue bd-abc does not exist` when importing hierarchical issues (e.g., `bd-abc.1`, `bd-abc.2`), this means the parent issue was deleted but children still reference it.
+If you see errors like `parent issue bd-abc does not exist` when bootstrapping from JSONL or pulling hierarchical issues (e.g., `bd-abc.1`, `bd-abc.2`), this means the parent issue was deleted but children still reference it.
 
 **Quick fix using resurrection:**
 
 ```bash
-# Auto-resurrect deleted parents from JSONL history
-bd import -i issues.jsonl --orphan-handling resurrect
-
-# Or set as default behavior
+# Set orphan handling to auto-resurrect deleted parents
 bd config set import.orphan_handling "resurrect"
-bd sync  # Now uses resurrect mode
+
+# Then pull or re-initialize
+bd dolt pull
 ```
 
 **What resurrection does:**
 
-1. Searches the full JSONL file for the missing parent issue
+1. Searches the import data for the missing parent issue
 2. Recreates it as a tombstone (Status=Closed, Priority=4)
 3. Preserves the parent's original title and description
 4. Maintains referential integrity for hierarchical children
@@ -200,7 +381,7 @@ bd config set import.orphan_handling "strict"
 
 - Parent issue was deleted using `bd delete`
 - Branch merge where one side deleted the parent
-- Manual JSONL editing that removed parent entries
+- Manual editing that removed parent entries
 - Database corruption or incomplete import
 
 **Prevention:**
@@ -211,30 +392,74 @@ bd config set import.orphan_handling "strict"
 
 See [CONFIG.md](CONFIG.md#example-import-orphan-handling) for complete configuration documentation.
 
+### Old data returns after reset
+
+**Symptom:** After running `bd admin reset --force` and `bd init`, old issues reappear.
+
+**Cause:** `bd admin reset --force` only removes **local** beads data. Old data can return from:
+
+1. **Dolt remotes** - If you have configured Dolt remotes, old data may exist there
+2. **Remote sync branch** - If you configured a sync branch, old data may exist on the remote
+3. **Other machines** - Other clones may push old data after you reset
+
+**Solution for complete clean slate:**
+
+```bash
+# 1. Reset local beads
+bd admin reset --force
+
+# 2. Delete remote sync branch (if configured)
+# Check your sync branch name first:
+bd config get sync.branch
+# Then delete it from remote:
+git push origin --delete <sync-branch-name>
+# Common names: beads-sync, beads-metadata
+
+# 3. Re-initialize
+bd init
+```
+
+**Less destructive alternatives:**
+
+```bash
+# Option A: Just delete the sync branch and reinit
+bd admin reset --force
+git push origin --delete beads-sync  # or your sync branch name
+bd init
+
+# Option B: Start fresh without sync branch
+bd admin reset --force
+bd init
+bd config set sync.branch ""  # Disable sync branch feature
+```
+
+**Note:** The `--hard` and `--skip-init` flags mentioned in [GH#479](https://github.com/steveyegge/beads/issues/479) were never implemented. Use the workarounds above for a complete reset.
+
+**Related:** [GH#922](https://github.com/steveyegge/beads/issues/922)
+
 ### Database corruption
 
-**Important**: Distinguish between **logical consistency issues** (ID collisions, wrong prefixes) and **physical SQLite corruption**.
+**Important**: Distinguish between **logical consistency issues** (ID collisions, wrong prefixes) and **physical database corruption**.
 
 For **physical database corruption** (disk failures, power loss, filesystem errors):
 
 ```bash
-# Check database integrity
-sqlite3 .beads/*.db "PRAGMA integrity_check;"
-
-# If corrupted, reimport from JSONL (source of truth in git)
-mv .beads/*.db .beads/*.db.backup
+# If corrupted, rebuild from a Dolt remote or from a backup snapshot
+mv .beads/dolt .beads/dolt.backup
 bd init
-bd import -i .beads/issues.jsonl
+bd dolt pull    # Pull from Dolt remote if configured
+# Or restore from a backup:
+# bd backup restore [path] --force
 ```
 
 For **logical consistency issues** (ID collisions from branch merges, parallel workers):
 
 ```bash
-# This is NOT corruption - use collision resolution instead
-bd import -i .beads/issues.jsonl
+# This is NOT corruption - use Dolt merge or bd doctor --fix
+bd doctor --fix
 ```
 
-See [FAQ](FAQ.md#whats-the-difference-between-sqlite-corruption-and-id-collisions) for the distinction.
+See [FAQ](FAQ.md#whats-the-difference-between-database-corruption-and-id-collisions) for the distinction.
 
 ### Multiple databases detected warning
 
@@ -291,46 +516,92 @@ This means bd found multiple `.beads` directories in your directory hierarchy. T
 
 **Note**: The warning only appears when bd detects multiple databases. If you see this consistently and want to suppress it, you're using the correct database (marked with `▶`).
 
-## Git and Sync Issues
+### Circuit breaker: "server appears down, failing fast"
 
-### Git merge conflict in `issues.jsonl`
+**Symptom:** Every `bd` command fails with `dolt circuit breaker is open: server appears down, failing fast (cooldown 30s)`. This persists across repeated invocations.
 
-When both sides add issues, you'll get conflicts. Resolution:
+**Cause:** The circuit breaker tripped after repeated connection failures. Its state is stored in a file at `/tmp/beads-dolt-circuit-<host>-<port>.json` (keyed on host:port) and shared across all `bd` processes. Once tripped, all commands to that specific host:port are rejected until a successful probe resets it.
 
-1. Open `.beads/issues.jsonl`
-2. Look for `<<<<<<< HEAD` markers
-3. Most conflicts can be resolved by **keeping both sides**
-4. Each line is independent unless IDs conflict
-5. For same-ID conflicts, keep the newest (check `updated_at`)
+**Note:** `bd dolt status` checks the server's PID file, not whether the server is actually accepting connections. A "running" status does not guarantee the server is reachable on the expected port.
 
-Example resolution:
+**Diagnosis:**
+
 ```bash
-# After resolving conflicts manually
-git add .beads/issues.jsonl
-git commit
-bd import -i .beads/issues.jsonl  # Sync to SQLite
+# Check circuit breaker state
+cat /tmp/beads-dolt-circuit-*.json
+
+# Check if the Dolt server is actually listening
+lsof -i :<port>
+
+# Compare configured port with what's actually running
+cat .beads/metadata.json | grep port
 ```
 
-See [ADVANCED.md](ADVANCED.md) for detailed merge strategies.
+**Fix:**
 
-### Git merge conflicts in JSONL
+```bash
+rm /tmp/beads-dolt-circuit-*.json
+bd dolt stop
+bd dolt start
+bd list
+```
+
+**Note (macOS):** On macOS, `/tmp` is a symlink to `/private/tmp`. The circuit breaker state file may persist across reboots since `/private/tmp` is not always cleared on restart.
+
+### Connection failures after upgrading from pre-Dolt versions
+
+**Symptom:** After upgrading from v0.49 or earlier to v0.58+, `bd` commands fail with connection errors or the circuit breaker trips on first run.
+
+**Cause:** Pre-Dolt versions used SQLite for storage. The Dolt backend requires a running Dolt server. On first run after upgrading, the server may not be configured or started yet.
+
+**Fix:**
+
+1. If you have existing JSONL data from before v0.50, migrate it using the provided script:
+   ```bash
+   scripts/migrate-jsonl-to-dolt.sh
+   ```
+2. Start the Dolt server:
+   ```bash
+   bd dolt start
+   ```
+3. If the circuit breaker tripped during failed connection attempts, clear the state file (see [Circuit breaker: "server appears down, failing fast"](#circuit-breaker-server-appears-down-failing-fast) above).
+4. Verify everything is working:
+   ```bash
+   bd list
+   ```
+
+## Git and Sync Issues
+
+### Merge conflicts
+
+Dolt handles merge conflicts natively with cell-level merge. When concurrent changes affect the same issue field, Dolt detects the conflict and allows resolution via SQL:
+
+```bash
+# Check for conflicts after a Dolt pull
+bd dolt pull
+
+# Resolve conflicts if any
+bd vc conflicts
+```
 
 **With hash-based IDs (v0.20.1+), ID collisions don't occur.** Different issues get different hash IDs.
 
-If git shows a conflict in `.beads/issues.jsonl`, it's because the same issue was modified on both branches:
+See [ADVANCED.md#handling-git-merge-conflicts](ADVANCED.md#handling-git-merge-conflicts) for details.
+
+### Hook timeout kills chained pre-commit hooks
+
+**Symptom:** After `bd hooks install`, chained pre-commit hooks (eslint, prettier, ruff, etc.) stop running. You see: `beads: hook 'pre-commit' timed out after 300s -- continuing without beads`.
+
+**Cause:** The beads hook shim wraps `bd hooks run` with an OS-level `timeout`. Since `bd hooks run` chains to your original hook (`.git/hooks/pre-commit.old`) internally, the timeout covers both beads' own work and your entire hook pipeline.
+
+**Fix:** Increase the timeout via the `BEADS_HOOK_TIMEOUT` environment variable:
 
 ```bash
-# Preview what will be updated
-bd import -i .beads/issues.jsonl --dry-run
-
-# Resolve git conflict (keep newer version or manually merge)
-git checkout --theirs .beads/issues.jsonl  # Or --ours, or edit manually
-
-# Import updates the database
-bd import -i .beads/issues.jsonl
+# Add to ~/.bashrc or ~/.zshrc
+export BEADS_HOOK_TIMEOUT=600  # 10 minutes (in seconds)
 ```
 
-See [ADVANCED.md#handling-git-merge-conflicts](ADVANCED.md#handling-git-merge-conflicts) for details.
+The default timeout is 300 seconds (5 minutes). For repos with very heavy pre-commit pipelines, you may need to increase this further.
 
 ### Permission denied on git hooks
 
@@ -350,7 +621,7 @@ $ git checkout main
 fatal: 'main' is already checked out at '/path/to/.git/beads-worktrees/beads-sync'
 ```
 
-**Cause:** Beads creates git worktrees internally when using the sync-branch feature (configured via `bd init --branch` or `bd config set sync.branch`). These worktrees lock the branches they're checked out to.
+**Cause:** Beads previously created git worktrees internally for a sync-branch feature (configured via `bd config set sync.branch`). These worktrees lock the branches they're checked out to. This feature has been removed; Dolt now stores data under `refs/dolt/data`, separate from standard Git refs.
 
 **Solution:**
 ```bash
@@ -391,21 +662,19 @@ See [WORKTREES.md](WORKTREES.md) for details on how beads uses worktrees.
 
 ### Auto-sync not working
 
-Check if auto-sync is enabled:
+Check if Dolt server is running and configured:
 
 ```bash
-# Check if daemon is running
-ps aux | grep "bd daemon"
+# Check if Dolt server is running
+bd doctor
 
-# Manually export/import
-bd export -o .beads/issues.jsonl
-bd import -i .beads/issues.jsonl
+# Manual sync with Dolt remotes
+bd dolt push
+bd dolt pull
 
-# Install git hooks for guaranteed sync
-cd examples/git-hooks && ./install.sh
+# Check sync configuration
+bd config get sync.remote
 ```
-
-If you disabled auto-sync with `--no-auto-flush` or `--no-auto-import`, remove those flags or use `bd sync` manually.
 
 ## Ready Work and Dependencies
 
@@ -469,7 +738,7 @@ For large databases (10k+ issues):
 
 ```bash
 # Export only open issues
-bd export --format=jsonl --status=open -o .beads/issues.jsonl
+bd export --format=jsonl --status=open -o open-issues.jsonl
 
 # Or filter by priority
 bd export --format=jsonl --priority=0 --priority=1 -o critical.jsonl
@@ -486,24 +755,17 @@ Check database size and consider compaction:
 bd stats
 
 # Preview compaction candidates
-bd compact --dry-run --all
+bd admin compact --dry-run --all
 
 # Compact old closed issues
-bd compact --days 90
+bd admin compact --days 90
+
+# Run Dolt garbage collection
+cd .beads/dolt && dolt gc
 ```
 
-### Large JSONL files
-
-If `.beads/issues.jsonl` is very large:
-
+Consider splitting large projects into multiple databases:
 ```bash
-# Check file size
-ls -lh .beads/issues.jsonl
-
-# Remove old closed issues
-bd compact --days 90
-
-# Or split into multiple projects
 cd ~/project/component1 && bd init --prefix comp1
 cd ~/project/component2 && bd init --prefix comp2
 ```
@@ -565,24 +827,22 @@ cat ~/Library/Application\ Support/Claude/claude_desktop_config.json
 bd version
 bd ready
 
-# Check for daemon
-ps aux | grep "bd daemon"
+# Check Dolt server health
+bd doctor
 ```
 
 See [integrations/beads-mcp/README.md](../integrations/beads-mcp/README.md) for MCP-specific troubleshooting.
 
 ### Sandboxed environments (Codex, Claude Code, etc.)
 
-**Issue:** Sandboxed environments restrict permissions, preventing daemon control and causing "out of sync" errors.
+**Issue:** Sandboxed environments restrict permissions, preventing server control and causing "out of sync" errors.
 
 **Common symptoms:**
-- "Database out of sync with JSONL" errors that persist after running `bd import`
-- `bd daemon --stop` fails with "operation not permitted"
-- Cannot kill daemon process with `kill <pid>`
-- JSONL hash mismatch warnings (bd-160)
-- Commands intermittently fail with staleness errors
+- "Database out of sync" errors that persist after running `bd dolt pull`
+- `bd dolt stop` fails with "operation not permitted"
+- Hash mismatch warnings (bd-160)
 
-**Root cause:** The sandbox can't signal/kill the existing daemon process, so the DB stays stale and refuses to import.
+**Root cause:** The sandbox can't signal/kill the existing Dolt server process.
 
 ---
 
@@ -598,65 +858,45 @@ When auto-detected, you'll see: `ℹ️  Sandbox detected, using direct mode`
 # Explicitly enable sandbox mode
 bd --sandbox ready
 bd --sandbox create "Fix bug" -p 1
-bd --sandbox update bd-42 --status in_progress
-
-# Equivalent to:
-bd --no-daemon --no-auto-flush --no-auto-import <command>
+bd --sandbox update bd-42 --claim
 ```
 
 **What sandbox mode does:**
-- Disables daemon (uses direct SQLite mode)
-- Disables auto-export to JSONL
-- Disables auto-import from JSONL
+- Uses embedded database mode (no server needed)
+- Disables auto-export
+- Disables auto-import
 - Allows bd to work in network-restricted environments
 
 **Note:** You'll need to manually sync when outside the sandbox:
 ```bash
 # After leaving sandbox, sync manually
-bd sync
+bd dolt push
 ```
 
 ---
 
 #### Escape hatches for stuck states
 
-If you're stuck in a "database out of sync" loop with a running daemon you can't stop, use these flags:
+If you're stuck in a "database out of sync" loop with a running server you can't stop, use these flags:
 
-**1. Force metadata update (`--force` flag on import)**
+**1. Force metadata update**
 
-When `bd import` reports "0 created, 0 updated" but staleness persists:
+If staleness persists after pulling:
 
 ```bash
-# Force metadata refresh even when DB appears synced
-bd import --force
+# Force metadata refresh
+bd doctor --fix
 
 # This updates internal metadata tracking without changing issues
-# Fixes: stuck state caused by stale daemon cache
+# Fixes: stuck state caused by stale server cache
 ```
 
-**Shows:** `Metadata updated (database already in sync with JSONL)`
-
-**2. Skip staleness check (`--allow-stale` global flag)**
-
-Emergency escape hatch to bypass staleness validation:
-
-```bash
-# Allow operations on potentially stale data
-bd --allow-stale ready
-bd --allow-stale list --status open
-
-# Shows warning:
-# ⚠️  Staleness check skipped (--allow-stale), data may be out of sync
-```
-
-**⚠️ Caution:** Use sparingly - you may see incomplete or outdated data.
-
-**3. Use sandbox mode (preferred)**
+**2. Use sandbox mode (preferred)**
 
 ```bash
 # Most reliable for sandboxed environments
 bd --sandbox ready
-bd --sandbox import -i .beads/issues.jsonl
+bd --sandbox dolt pull
 ```
 
 ---
@@ -669,14 +909,11 @@ If stuck in a sandboxed environment:
 # Step 1: Try sandbox mode (cleanest solution)
 bd --sandbox ready
 
-# Step 2: If you get staleness errors, force import
-bd import --force -i .beads/issues.jsonl
+# Step 2: If you get staleness errors, force fix
+bd doctor --fix
 
-# Step 3: If still blocked, use allow-stale (emergency only)
-bd --allow-stale ready
-
-# Step 4: When back outside sandbox, sync normally
-bd sync
+# Step 3: When back outside sandbox, sync normally
+bd dolt push
 ```
 
 ---
@@ -685,12 +922,10 @@ bd sync
 
 | Flag | Purpose | When to use | Risk |
 |------|---------|-------------|------|
-| `--sandbox` | Disable daemon and auto-sync | Sandboxed environments (Codex, containers) | Low - safe for sandboxes |
-| `--force` (import) | Force metadata update | Stuck "0 created, 0 updated" loop | Low - updates metadata only |
-| `--allow-stale` | Skip staleness validation | Emergency access to database | **High** - may show stale data |
+| `--sandbox` | Use embedded mode, disable auto-sync | Sandboxed environments (Codex, containers) | Low - safe for sandboxes |
+| `bd doctor --fix` | Force metadata update | Stuck staleness loop | Low - updates metadata only |
 
 **Related:**
-- See [DAEMON.md](DAEMON.md) for daemon troubleshooting
 - See [Claude Code sandboxing documentation](https://www.anthropic.com/engineering/claude-code-sandboxing) for more about sandbox restrictions
 - GitHub issue [#353](https://github.com/steveyegge/beads/issues/353) for background
 
@@ -713,18 +948,45 @@ where.exe bd
 $env:Path = [Environment]::GetEnvironmentVariable("Path", "User")
 ```
 
-### Windows: Firewall blocking daemon
+### Windows: Firewall blocking Dolt server
 
-The daemon listens on loopback TCP. Allow `bd.exe` through Windows Firewall:
+The Dolt server listens on loopback TCP. Allow `bd.exe` through Windows Firewall:
 
 1. Open Windows Security → Firewall & network protection
 2. Click "Allow an app through firewall"
 3. Add `bd.exe` and enable for Private networks
 4. Or disable firewall temporarily for testing
 
+### Windows: Controlled Folder Access blocks bd init
+
+**Symptom:** `bd init` hangs indefinitely with high CPU usage, and CTRL+C doesn't work.
+
+**Cause:** Windows Controlled Folder Access is blocking `bd.exe` from creating the `.beads` directory.
+
+**Diagnosis:** Run with verbose flag to see the actual error:
+```pwsh
+bd init -v
+# Error: failed to create .beads directory: mkdir .beads: The system cannot find the file specified
+```
+
+**Solution:** Add `bd.exe` to the Controlled Folder Access whitelist:
+
+1. Open Windows Security → Virus & threat protection
+2. Click "Ransomware protection" → "Manage ransomware protection"
+3. Under "Controlled folder access", click "Allow an app through Controlled folder access"
+4. Click "Add an allowed app" → "Browse all apps"
+5. Navigate to and select `bd.exe` (typically in `%USERPROFILE%\go\bin\bd.exe`)
+6. Retry `bd init` - it should work instantly
+
+**Note:** Unlike typical blocked apps, Controlled Folder Access may not show a notification when blocking `bd init`, making this issue hard to diagnose without the `-v` flag.
+
 ### macOS: Gatekeeper blocking execution
 
 If macOS blocks bd:
+
+1. Verify the downloaded binary checksum matches the release `checksums.txt`.
+2. If you used `scripts/install.sh`, note that macOS ad-hoc re-signing is now **opt-in** (`BEADS_INSTALL_RESIGN_MACOS=1`).
+3. Use one of the approval paths below.
 
 ```bash
 # Remove quarantine attribute

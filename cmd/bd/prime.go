@@ -1,16 +1,18 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads"
+	internalbeads "github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 )
 
@@ -18,7 +20,28 @@ var (
 	primeFullMode    bool
 	primeMCPMode     bool
 	primeStealthMode bool
+	primeExportMode  bool
 )
+
+// resolveGlobalPrimePath returns the path to ~/.config/beads/PRIME.md if it
+// exists. configDirOverride is used for testing; pass "" for production.
+func resolveGlobalPrimePath(configDirOverride string) string {
+	var configDir string
+	if configDirOverride != "" {
+		configDir = configDirOverride
+	} else {
+		var err error
+		configDir, err = os.UserConfigDir()
+		if err != nil {
+			return ""
+		}
+	}
+	p := filepath.Join(configDir, "beads", "PRIME.md")
+	if _, err := os.Stat(p); err == nil {
+		return p
+	}
+	return ""
+}
 
 var primeCmd = &cobra.Command{
 	Use:     "prime",
@@ -31,9 +54,18 @@ Automatically detects if MCP server is active and adapts output:
 - CLI mode: Full command reference (~1-2k tokens)
 
 Designed for Claude Code hooks (SessionStart, PreCompact) to prevent
-agents from forgetting bd workflow after context compaction.`,
+agents from forgetting bd workflow after context compaction.
+
+Config options:
+- no-git-ops: When true, outputs stealth mode (no git commands in session close protocol).
+  Set via: bd config set no-git-ops true
+  Useful when you want to control when commits happen manually.
+
+	Workflow customization:
+	- Place a .beads/PRIME.md file in the local clone or resolved workspace to override the default output entirely.
+	- Use --export to dump the default content for customization.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		// Find .beads/ directory (supports both database and JSONL-only mode)
+		// Resolve the active beads workspace.
 		beadsDir := beads.FindBeadsDir()
 		if beadsDir == "" {
 			// Not in a beads project - silent exit with success
@@ -51,8 +83,42 @@ agents from forgetting bd workflow after context compaction.`,
 			mcpMode = true
 		}
 
+		// Check for stealth mode: flag OR config (GH#593)
+		// This allows users to disable git ops in session close protocol via config
+		stealthMode := primeStealthMode || config.GetBool("no-git-ops")
+
+		// Check for custom PRIME.md override (unless --export flag)
+		// This allows users to fully customize workflow instructions
+		// Check local .beads/ first (clone-specific override), then the
+		// resolved workspace location.
+		if !primeExportMode {
+			localPrimePath := filepath.Join(".beads", "PRIME.md")
+			redirectedPrimePath := filepath.Join(beadsDir, "PRIME.md")
+
+			// Try local first (user's clone-specific customization)
+			// #nosec G304 -- path is relative to cwd
+			if content, err := os.ReadFile(localPrimePath); err == nil {
+				fmt.Print(string(content))
+				return
+			}
+			// Fall back to redirected location (shared customization)
+			// #nosec G304 -- path is constructed from beadsDir which we control
+			if content, err := os.ReadFile(redirectedPrimePath); err == nil {
+				fmt.Print(string(content))
+				return
+			}
+			// Fall back to global config (~/.config/beads/PRIME.md)
+			// #nosec G304 -- path constructed from UserConfigDir which we control
+			if globalPath := resolveGlobalPrimePath(""); globalPath != "" {
+				if content, err := os.ReadFile(globalPath); err == nil {
+					fmt.Print(string(content))
+					return
+				}
+			}
+		}
+
 		// Output workflow context (adaptive based on MCP and stealth mode)
-		if err := outputPrimeContext(os.Stdout, mcpMode, primeStealthMode); err != nil {
+		if err := outputPrimeContext(os.Stdout, mcpMode, stealthMode); err != nil {
 			// Suppress all errors - silent exit with success
 			// Never write to stderr (breaks Windows compatibility)
 			os.Exit(0)
@@ -64,6 +130,7 @@ func init() {
 	primeCmd.Flags().BoolVar(&primeFullMode, "full", false, "Force full CLI output (ignore MCP detection)")
 	primeCmd.Flags().BoolVar(&primeMCPMode, "mcp", false, "Force MCP mode (minimal output)")
 	primeCmd.Flags().BoolVar(&primeStealthMode, "stealth", false, "Stealth mode (no git operations, flush only)")
+	primeCmd.Flags().BoolVar(&primeExportMode, "export", false, "Output default content (ignores PRIME.md override)")
 	rootCmd.AddCommand(primeCmd)
 }
 
@@ -112,9 +179,42 @@ func isMCPActive() bool {
 var isEphemeralBranch = func() bool {
 	// git rev-parse --abbrev-ref --symbolic-full-name @{u}
 	// Returns error code 128 if no upstream configured
-	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
-	err := cmd.Run()
-	return err != nil
+	rc, err := internalbeads.GetRepoContext()
+	if err != nil {
+		return true // Default to ephemeral if we can't determine context
+	}
+	cmd := rc.GitCmdCWD(context.Background(), "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+	return cmd.Run() != nil
+}
+
+// primeHasGitRemote detects if any git remote is configured (stubbable for tests)
+var primeHasGitRemote = func() bool {
+	rc, err := internalbeads.GetRepoContext()
+	if err != nil {
+		return false
+	}
+	cmd := rc.GitCmdCWD(context.Background(), "remote")
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return len(strings.TrimSpace(string(out))) > 0
+}
+
+// getRedirectNotice returns a notice string if beads is redirected
+func getRedirectNotice(verbose bool) string {
+	redirectInfo := beads.GetRedirectInfo()
+	if !redirectInfo.IsRedirected {
+		return ""
+	}
+
+	if verbose {
+		return fmt.Sprintf(`> ⚠️ **Redirected**: Local .beads → %s
+> You share issues with other clones using this redirect.
+
+`, redirectInfo.TargetDir)
+	}
+	return fmt.Sprintf("**Note**: Beads redirected to %s (shared with other clones)\n\n", redirectInfo.TargetDir)
 }
 
 // outputPrimeContext outputs workflow context in markdown format
@@ -125,37 +225,102 @@ func outputPrimeContext(w io.Writer, mcpMode bool, stealthMode bool) error {
 	return outputCLIContext(w, stealthMode)
 }
 
+// formatMemoriesForPrime queries memories from the k/v store and formats them for injection.
+// Returns empty string if no memories or if store is unavailable.
+func formatMemoriesForPrime(compact bool) string {
+	// Try to initialize store if not already active (prime may run before other commands)
+	if store == nil {
+		if err := ensureDirectMode("memory injection"); err != nil {
+			return "" // Silently skip — store unavailable
+		}
+	}
+	if store == nil {
+		return ""
+	}
+	ctx := context.Background()
+	allConfig, err := store.GetAllConfig(ctx)
+	if err != nil {
+		return ""
+	}
+
+	fullPrefix := kvPrefix + memoryPrefix
+	var keys []string
+	memories := make(map[string]string)
+	for k, v := range allConfig {
+		if strings.HasPrefix(k, fullPrefix) {
+			userKey := strings.TrimPrefix(k, fullPrefix)
+			memories[userKey] = v
+			keys = append(keys, userKey)
+		}
+	}
+	if len(memories) == 0 {
+		return ""
+	}
+	sort.Strings(keys)
+
+	var sb strings.Builder
+	if compact {
+		sb.WriteString("\n## Memories\n")
+		for _, k := range keys {
+			// Compact: one line per memory
+			v := strings.ReplaceAll(memories[k], "\n", " ")
+			if len(v) > 150 {
+				v = v[:147] + "..."
+			}
+			sb.WriteString(fmt.Sprintf("- **%s**: %s\n", k, v))
+		}
+	} else {
+		sb.WriteString(fmt.Sprintf("\n## Persistent Memories (%d)\n\n", len(memories)))
+		sb.WriteString("Stored via `bd remember`. Update in place with `bd remember --key <key> \"new content\"`. Search with `bd memories <keyword>`. Remove with `bd forget <key>`.\n\n")
+		for _, k := range keys {
+			sb.WriteString(fmt.Sprintf("### %s\n%s\n\n", k, memories[k]))
+		}
+	}
+	return sb.String()
+}
+
 // outputMCPContext outputs minimal context for MCP users
 func outputMCPContext(w io.Writer, stealthMode bool) error {
 	ephemeral := isEphemeralBranch()
 	noPush := config.GetBool("no-push")
+	localOnly := !primeHasGitRemote()
 
 	var closeProtocol string
-	if stealthMode {
-		// Stealth mode: only flush to JSONL as there's nothing to commit.
-		closeProtocol = "Before saying \"done\": bd sync --flush-only"
+	if stealthMode || localOnly {
+		// Stealth mode or local-only: close issues, no git operations
+		closeProtocol = "Before saying \"done\": bd close <completed-ids>"
 	} else if ephemeral {
-		closeProtocol = "Before saying \"done\": git status → git add → bd sync --from-main → git commit (no push - ephemeral branch)"
+		closeProtocol = "Before saying \"done\": git status → git add → git commit (no push - ephemeral branch)"
 	} else if noPush {
-		closeProtocol = "Before saying \"done\": git status → git add → bd sync → git commit (push disabled - run git push manually)"
+		closeProtocol = "Before saying \"done\": git status → git add → git commit (push disabled - run git push manually)"
 	} else {
-		closeProtocol = "Before saying \"done\": git status → git add → bd sync → git commit → bd sync → git push"
+		closeProtocol = "Before saying \"done\": git status → git add → git commit → git push"
 	}
+
+	redirectNotice := getRedirectNotice(false)
 
 	context := `# Beads Issue Tracker Active
 
-# 🚨 SESSION CLOSE PROTOCOL 🚨
+` + redirectNotice + `# 🚨 SESSION CLOSE PROTOCOL 🚨
 
 ` + closeProtocol + `
 
 ## Core Rules
-- Track strategic work in beads (multi-session, dependencies, discovered work)
-- TodoWrite is fine for simple single-session linear tasks
-- When in doubt, prefer bd—persistence you don't need beats lost context
+- **Default**: Use beads for ALL task tracking (` + "`bd create`" + `, ` + "`bd ready`" + `, ` + "`bd close`" + `)
+- **Prohibited**: Do NOT use TodoWrite, TaskCreate, or markdown files for task tracking
+- **Workflow**: Create beads issue BEFORE writing code, mark in_progress when starting
+- **Memory**: Use ` + "`bd remember`" + ` for persistent knowledge. Do NOT use MEMORY.md files.
+- Persistence you don't need beats lost context
 
 Start: Check ` + "`ready`" + ` tool for available work.
 `
 	_, _ = fmt.Fprint(w, context)
+
+	// Inject memories (compact for MCP)
+	if mem := formatMemoriesForPrime(true); mem != "" {
+		_, _ = fmt.Fprint(w, mem)
+	}
+
 	return nil
 }
 
@@ -163,78 +328,92 @@ Start: Check ` + "`ready`" + ` tool for available work.
 func outputCLIContext(w io.Writer, stealthMode bool) error {
 	ephemeral := isEphemeralBranch()
 	noPush := config.GetBool("no-push")
+	localOnly := !primeHasGitRemote()
 
 	var closeProtocol string
 	var closeNote string
 	var syncSection string
 	var completingWorkflow string
+	var gitWorkflowRule string
 
-	if stealthMode {
-		// Stealth mode: only flush to JSONL, no git operations
-		closeProtocol = `[ ] bd sync --flush-only    (export beads to JSONL only)`
+	if stealthMode || localOnly {
+		// Stealth mode or local-only: close issues, no git operations
+		closeProtocol = `[ ] bd close <id1> <id2> ...   (close completed issues)`
 		syncSection = `### Sync & Collaboration
-- ` + "`bd sync --flush-only`" + ` - Export to JSONL`
+- ` + "`bd search <query>`" + ` - Search issues by keyword`
 		completingWorkflow = `**Completing work:**
 ` + "```bash" + `
 bd close <id1> <id2> ...    # Close all completed issues at once
-bd sync --flush-only        # Export to JSONL
 ` + "```"
+		// Only show local-only note if not in stealth mode (stealth is explicit user choice)
+		if localOnly && !stealthMode {
+			closeNote = "**Note:** No git remote configured. Issues are saved locally only."
+			gitWorkflowRule = "Git workflow: local-only (no git remote)"
+		} else {
+			gitWorkflowRule = "Git workflow: stealth mode (no git ops)"
+		}
 	} else if ephemeral {
 		closeProtocol = `[ ] 1. git status              (check what changed)
 [ ] 2. git add <files>         (stage code changes)
-[ ] 3. bd sync --from-main     (pull beads updates from main)
+[ ] 3. bd dolt pull            (pull beads updates from main)
 [ ] 4. git commit -m "..."     (commit code changes)`
 		closeNote = "**Note:** This is an ephemeral branch (no upstream). Code is merged to main locally, not pushed."
 		syncSection = `### Sync & Collaboration
-- ` + "`bd sync --from-main`" + ` - Pull beads updates from main (for ephemeral branches)
-- ` + "`bd sync --status`" + ` - Check sync status without syncing`
+- ` + "`bd dolt pull`" + ` - Pull beads updates from Dolt remote
+- ` + "`bd dolt push`" + ` - Push beads to Dolt remote
+- ` + "`bd search <query>`" + ` - Search issues by keyword`
 		completingWorkflow = `**Completing work:**
 ` + "```bash" + `
 bd close <id1> <id2> ...    # Close all completed issues at once
-bd sync --from-main         # Pull latest beads from main
+bd dolt pull                # Pull latest beads from main
 git add . && git commit -m "..."  # Commit your changes
 # Merge to main when ready (local merge, not push)
 ` + "```"
+		gitWorkflowRule = "Git workflow: run `bd dolt pull` at session start"
 	} else if noPush {
 		closeProtocol = `[ ] 1. git status              (check what changed)
 [ ] 2. git add <files>         (stage code changes)
-[ ] 3. bd sync                 (commit beads changes)
-[ ] 4. git commit -m "..."     (commit code)
-[ ] 5. bd sync                 (commit any new beads changes)`
+[ ] 3. git commit -m "..."     (commit code)
+[ ] 4. git push                (push when ready)`
 		closeNote = "**Note:** Push disabled via config. Run `git push` manually when ready."
 		syncSection = `### Sync & Collaboration
-- ` + "`bd sync`" + ` - Sync with git remote (run at session end)
-- ` + "`bd sync --status`" + ` - Check sync status without syncing`
+- ` + "`bd dolt push`" + ` - Push beads to Dolt remote
+- ` + "`bd dolt pull`" + ` - Pull beads from Dolt remote
+- ` + "`bd search <query>`" + ` - Search issues by keyword`
 		completingWorkflow = `**Completing work:**
 ` + "```bash" + `
 bd close <id1> <id2> ...    # Close all completed issues at once
-bd sync                     # Sync beads (push disabled)
+git add . && git commit -m "..."  # Commit code changes
 # git push                  # Run manually when ready
 ` + "```"
+		gitWorkflowRule = "Git workflow: beads auto-commit to Dolt (push disabled)"
 	} else {
 		closeProtocol = `[ ] 1. git status              (check what changed)
 [ ] 2. git add <files>         (stage code changes)
-[ ] 3. bd sync                 (commit beads changes)
-[ ] 4. git commit -m "..."     (commit code)
-[ ] 5. bd sync                 (commit any new beads changes)
-[ ] 6. git push                (push to remote)`
+[ ] 3. git commit -m "..."     (commit code)
+[ ] 4. git push                (push to remote)`
 		closeNote = "**NEVER skip this.** Work is not done until pushed."
 		syncSection = `### Sync & Collaboration
-- ` + "`bd sync`" + ` - Sync with git remote (run at session end)
-- ` + "`bd sync --status`" + ` - Check sync status without syncing`
+- ` + "`bd dolt push`" + ` - Push beads to Dolt remote
+- ` + "`bd dolt pull`" + ` - Pull beads from Dolt remote
+- ` + "`bd search <query>`" + ` - Search issues by keyword`
 		completingWorkflow = `**Completing work:**
 ` + "```bash" + `
 bd close <id1> <id2> ...    # Close all completed issues at once
-bd sync                     # Push to remote
+git add . && git commit -m "..."  # Commit code changes
+git push                    # Push to remote
 ` + "```"
+		gitWorkflowRule = "Git workflow: beads auto-commit to Dolt, run `git push` at session end"
 	}
+
+	redirectNotice := getRedirectNotice(true)
 
 	context := `# Beads Workflow Context
 
 > **Context Recovery**: Run ` + "`bd prime`" + ` after compaction, clear, or new session
-> Hooks auto-call this in Claude Code when .beads/ detected
+> Hooks auto-call this in Claude Code when a beads workspace is resolved
 
-# 🚨 SESSION CLOSE PROTOCOL 🚨
+` + redirectNotice + `# 🚨 SESSION CLOSE PROTOCOL 🚨
 
 **CRITICAL**: Before saying "done" or "complete", you MUST run this checklist:
 
@@ -245,10 +424,12 @@ bd sync                     # Push to remote
 ` + closeNote + `
 
 ## Core Rules
-- Track strategic work in beads (multi-session, dependencies, discovered work)
-- Use ` + "`bd create`" + ` for issues, TodoWrite for simple single-session execution
-- When in doubt, prefer bd—persistence you don't need beats lost context
-- Git workflow: hooks auto-sync, run ` + "`bd sync`" + ` at session end
+- **Default**: Use beads for ALL task tracking (` + "`bd create`" + `, ` + "`bd ready`" + `, ` + "`bd close`" + `)
+- **Prohibited**: Do NOT use TodoWrite, TaskCreate, or markdown files for task tracking
+- **Workflow**: Create beads issue BEFORE writing code, mark in_progress when starting
+- **Memory**: Use ` + "`bd remember \"insight\"`" + ` for persistent knowledge across sessions. Do NOT use MEMORY.md files — they fragment across accounts. Search with ` + "`bd memories <keyword>`" + `.
+- Persistence you don't need beats lost context
+- ` + gitWorkflowRule + `
 - Session management: check ` + "`bd ready`" + ` for available work
 
 ## Essential Commands
@@ -260,14 +441,16 @@ bd sync                     # Push to remote
 - ` + "`bd show <id>`" + ` - Detailed issue view with dependencies
 
 ### Creating & Updating
-- ` + "`bd create --title=\"...\" --type=task|bug|feature --priority=2`" + ` - New issue
+- ` + "`bd create --title=\"Summary of this issue\" --description=\"Why this issue exists and what needs to be done\" --type=task|bug|feature --priority=2`" + ` - New issue
   - Priority: 0-4 or P0-P4 (0=critical, 2=medium, 4=backlog). NOT "high"/"medium"/"low"
-- ` + "`bd update <id> --status=in_progress`" + ` - Claim work
+- ` + "`bd update <id> --claim`" + ` - Claim work
 - ` + "`bd update <id> --assignee=username`" + ` - Assign to someone
+- ` + "`bd update <id> --title/--description/--notes/--design`" + ` - Update fields inline
 - ` + "`bd close <id>`" + ` - Mark complete
 - ` + "`bd close <id1> <id2> ...`" + ` - Close multiple issues at once (more efficient)
 - ` + "`bd close <id> --reason=\"explanation\"`" + ` - Close with reason
 - **Tip**: When creating multiple issues/tasks/epics, use parallel subagents for efficiency
+- **WARNING**: Do NOT use ` + "`bd edit`" + ` - it opens $EDITOR (vim/nano) which blocks agents
 
 ### Dependencies & Blocking
 - ` + "`bd dep add <issue> <depends-on>`" + ` - Add dependency (issue depends on depends-on)
@@ -279,6 +462,28 @@ bd sync                     # Push to remote
 ### Project Health
 - ` + "`bd stats`" + ` - Project statistics (open/closed/blocked counts)
 - ` + "`bd doctor`" + ` - Check for issues (sync problems, missing hooks)
+- ` + "`bd doctor --check=conventions`" + ` - Check for convention drift (lint, stale, orphans)
+
+### Quality Tools
+- ` + "`bd create --validate`" + ` - Check description has required sections
+- ` + "`bd create --acceptance=\"criteria\"`" + ` - Set acceptance criteria (checked by --validate)
+- ` + "`bd create --design=\"decisions\"`" + ` - Record design decisions
+- ` + "`bd create --notes=\"context\"`" + ` - Add supplementary notes
+- ` + "`bd config set validation.on-create warn`" + ` - Auto-validate on every create
+- ` + "`bd lint`" + ` - Check existing issues for missing sections
+
+### Lifecycle & Hygiene
+- ` + "`bd defer <id> --until=\"date\"`" + ` - Defer work to a future date
+- ` + "`bd supersede <id> --with=<new-id>`" + ` - Mark issue as superseded
+- ` + "`bd close <id> --suggest-next`" + ` - Show newly unblocked issues after closing
+- ` + "`bd stale`" + ` - Find issues with no recent activity
+- ` + "`bd orphans`" + ` - Find issues with broken dependencies
+- ` + "`bd preflight`" + ` - Pre-PR checks (lint, stale, orphans)
+- ` + "`bd human <id>`" + ` - Flag for human decision (list/respond/dismiss)
+
+### Structured Workflows
+- ` + "`bd formula list`" + ` - See available workflow templates
+- ` + "`bd mol pour <name>`" + ` - Start structured workflow from formula
 
 ## Common Workflows
 
@@ -286,7 +491,7 @@ bd sync                     # Push to remote
 ` + "```bash" + `
 bd ready           # Find available work
 bd show <id>       # Review issue details
-bd update <id> --status=in_progress  # Claim it
+bd update <id> --claim  # Claim it
 ` + "```" + `
 
 ` + completingWorkflow + `
@@ -294,11 +499,17 @@ bd update <id> --status=in_progress  # Claim it
 **Creating dependent work:**
 ` + "```bash" + `
 # Run bd create commands in parallel (use subagents for many items)
-bd create --title="Implement feature X" --type=feature
-bd create --title="Write tests for X" --type=task
+bd create --title="Implement feature X" --description="Why this issue exists and what needs to be done" --type=feature
+bd create --title="Write tests for X" --description="Why this issue exists and what needs to be done" --type=task
 bd dep add beads-yyy beads-xxx  # Tests depend on Feature (Feature blocks tests)
 ` + "```" + `
 `
 	_, _ = fmt.Fprint(w, context)
+
+	// Inject memories (full format for CLI)
+	if mem := formatMemoriesForPrime(false); mem != "" {
+		_, _ = fmt.Fprint(w, mem)
+	}
+
 	return nil
 }

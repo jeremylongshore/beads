@@ -1,37 +1,16 @@
 {
-  "enabledPlugins": {
-    "beads@beads-marketplace": false
-  },
   "hooks": {
-    "SessionStart": [
+    "PreToolUse": [
       {
-        "matcher": "",
+        "matcher": "Bash",
         "hooks": [
           {
             "type": "command",
-            "command": "gt prime"
-          }
-        ]
-      }
-    ],
-    "PreCompact": [
-      {
-        "matcher": "",
-        "hooks": [
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/block-gh-watch.sh"
+          },
           {
             "type": "command",
-            "command": "gt prime"
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "gt mail check --inject"
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/block-interactive-cmds.sh"
           }
         ]
       }

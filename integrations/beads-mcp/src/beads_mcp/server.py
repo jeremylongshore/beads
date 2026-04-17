@@ -41,6 +41,7 @@ from beads_mcp.models import (
 from beads_mcp.tools import (
     beads_add_dependency,
     beads_blocked,
+    beads_claim_issue,
     beads_close_issue,
     beads_create_issue,
     beads_detect_pollution,
@@ -70,7 +71,6 @@ logging.basicConfig(
 T = TypeVar("T")
 
 # Global state for cleanup
-_daemon_clients: list[Any] = []
 _cleanup_done = False
 
 # Persistent workspace context (survives across MCP tool calls)
@@ -131,28 +131,16 @@ IMPORTANT: Call context(workspace_root='...') to set your workspace before any w
 
 def cleanup() -> None:
     """Clean up resources on exit.
-    
-    Closes daemon connections and removes temp files.
+
     Safe to call multiple times.
     """
     global _cleanup_done
-    
+
     if _cleanup_done:
         return
-    
+
     _cleanup_done = True
     logger.info("Cleaning up beads-mcp resources...")
-    
-    # Close all daemon client connections
-    for client in _daemon_clients:
-        try:
-            if hasattr(client, 'cleanup'):
-                client.cleanup()
-                logger.debug(f"Closed daemon client: {client}")
-        except Exception as e:
-            logger.warning(f"Error closing daemon client: {e}")
-    
-    _daemon_clients.clear()
     logger.info("Cleanup complete")
 
 
@@ -237,17 +225,19 @@ def require_context(func: Callable[..., Awaitable[T]]) -> Callable[..., Awaitabl
 
 
 def _find_beads_db(workspace_root: str) -> str | None:
-    """Find .beads/*.db by walking up from workspace_root.
-    
+    """Find a SQLite .beads/*.db by walking up from workspace_root.
+
     Args:
         workspace_root: Starting directory to search from
-        
+
     Returns:
-        Absolute path to first .db file found in .beads/, None otherwise
+        Absolute path to first .db file found in .beads/, None otherwise.
+        Returns None for Dolt-backed projects (which have no single .db file);
+        callers should use _find_beads_project() to detect those.
     """
     import glob
     current = os.path.abspath(workspace_root)
-    
+
     while True:
         beads_dir = os.path.join(current, ".beads")
         if os.path.isdir(beads_dir):
@@ -255,13 +245,67 @@ def _find_beads_db(workspace_root: str) -> str | None:
             db_files = glob.glob(os.path.join(beads_dir, "*.db"))
             if db_files:
                 return db_files[0]  # Return first .db file found
-        
+
         parent = os.path.dirname(current)
         if parent == current:  # Reached root
             break
         current = parent
-    
+
     return None
+
+
+def _find_beads_project(workspace_root: str) -> tuple[str, str] | None:
+    """Find a .beads project by walking up from workspace_root.
+
+    Delegates to ``_find_beads_db_in_tree`` so that ``.beads/redirect`` files,
+    symlinks, and all backend types are handled identically to the rest of the
+    MCP server.
+
+    Returns:
+        (project_root, backend) where backend is "sqlite", "dolt-embedded",
+        "dolt-server", or "unknown". None if no .beads project is found.
+    """
+    from beads_mcp.tools import _find_beads_db_in_tree
+
+    project_root = _find_beads_db_in_tree(workspace_root)
+    if project_root is None:
+        return None
+    backend = _detect_backend(os.path.join(project_root, ".beads"))
+    return (project_root, backend)
+
+
+def _detect_backend(beads_dir: str) -> str:
+    """Identify the storage backend in a .beads directory."""
+    import glob
+    import json
+
+    metadata_path = os.path.join(beads_dir, "metadata.json")
+    if os.path.isfile(metadata_path):
+        try:
+            with open(metadata_path) as f:
+                meta = json.load(f)
+            if isinstance(meta, dict):
+                backend = (meta.get("backend") or meta.get("database") or "").lower()
+                if backend == "dolt":
+                    if (meta.get("dolt_mode") or "").lower() == "embedded":
+                        return "dolt-embedded"
+                    return "dolt-server"
+                if backend == "sqlite":
+                    return "sqlite"
+        except Exception:
+            pass
+
+    if os.path.isdir(os.path.join(beads_dir, "embeddeddolt")):
+        return "dolt-embedded"
+    if os.path.isdir(os.path.join(beads_dir, "dolt")):
+        return "dolt-server"
+
+    for match in glob.glob(os.path.join(beads_dir, "*.db")):
+        base = os.path.basename(match)
+        if ".backup" not in base and base != "vc.db":
+            return "sqlite"
+
+    return "unknown"
 
 
 def _resolve_workspace_root(path: str) -> str:
@@ -314,6 +358,7 @@ _TOOL_CATALOG = {
     "list": "List issues with filters (status, priority, type)",
     "show": "Show full details for a specific issue",
     "create": "Create a new issue (bug, feature, task, epic)",
+    "claim": "Atomically claim an issue for work (assignee + in_progress)",
     "update": "Update issue status, priority, or assignee",
     "close": "Close/complete an issue",
     "reopen": "Reopen closed issues",
@@ -366,6 +411,7 @@ async def get_tool_info(tool_name: str) -> dict[str, Any]:
             "parameters": {
                 "limit": "int (1-100, default 10) - Max issues to return",
                 "priority": "int (0-4, optional) - Filter by priority",
+                "issue_type": "str (optional) - Filter by type (task, bug, feature, epic, chore, decision, merge-request, or custom)",
                 "assignee": "str (optional) - Filter by assignee",
                 "labels": "list[str] (optional) - AND filter: must have ALL labels",
                 "labels_any": "list[str] (optional) - OR filter: must have at least one",
@@ -383,9 +429,9 @@ async def get_tool_info(tool_name: str) -> dict[str, Any]:
             "name": "list",
             "description": "List all issues with optional filters",
             "parameters": {
-                "status": "open|in_progress|blocked|deferred|closed (optional)",
+                "status": "open|in_progress|blocked|deferred|closed or custom (optional)",
                 "priority": "int 0-4 (optional)",
-                "issue_type": "bug|feature|task|epic|chore (optional)",
+                "issue_type": "bug|feature|task|epic|chore|decision or custom (optional)",
                 "assignee": "str (optional)",
                 "labels": "list[str] (optional) - AND filter: must have ALL labels",
                 "labels_any": "list[str] (optional) - OR filter: must have at least one",
@@ -421,7 +467,7 @@ async def get_tool_info(tool_name: str) -> dict[str, Any]:
                 "title": "str (required)",
                 "description": "str (default '')",
                 "priority": "int 0-4 (default 2)",
-                "issue_type": "bug|feature|task|epic|chore (default task)",
+                "issue_type": "bug|feature|task|epic|chore|decision or custom (default task)",
                 "assignee": "str (optional)",
                 "labels": "list[str] (optional)",
                 "deps": "list[str] (optional) - dependency IDs",
@@ -431,12 +477,23 @@ async def get_tool_info(tool_name: str) -> dict[str, Any]:
             "returns": "OperationResult {id, action} or full Issue if brief=False",
             "example": "create(title='Fix auth bug', priority=1, issue_type='bug')"
         },
+        "claim": {
+            "name": "claim",
+            "description": "Atomically claim an issue for work",
+            "parameters": {
+                "issue_id": "str (required)",
+                "brief": "bool (default true) - Return OperationResult instead of full Issue",
+                "workspace_root": "str (optional)"
+            },
+            "returns": "OperationResult {id, action='claimed'} or full Issue if brief=False",
+            "example": "claim(issue_id='bd-a1b2')"
+        },
         "update": {
             "name": "update",
             "description": "Update an existing issue",
             "parameters": {
                 "issue_id": "str (required)",
-                "status": "open|in_progress|blocked|deferred|closed (optional)",
+                "status": "open|in_progress|blocked|deferred|closed or custom (optional)",
                 "priority": "int 0-4 (optional)",
                 "assignee": "str (optional)",
                 "title": "str (optional)",
@@ -445,7 +502,7 @@ async def get_tool_info(tool_name: str) -> dict[str, Any]:
                 "workspace_root": "str (optional)"
             },
             "returns": "OperationResult {id, action} or full Issue if brief=False",
-            "example": "update(issue_id='bd-a1b2', status='in_progress')"
+            "example": "update(issue_id='bd-a1b2', status='blocked')"
         },
         "close": {
             "name": "close",
@@ -622,10 +679,10 @@ async def _context_set(workspace_root: str) -> str:
     os.environ["BEADS_WORKING_DIR"] = resolved_root
     os.environ["BEADS_CONTEXT_SET"] = "1"
 
-    # Find beads database
-    db_path = _find_beads_db(resolved_root)
+    # Locate the beads project (handles SQLite and Dolt backends)
+    project = _find_beads_project(resolved_root)
 
-    if db_path is None:
+    if project is None:
         # Clear any stale DB path
         _workspace_context.pop("BEADS_DB", None)
         os.environ.pop("BEADS_DB", None)
@@ -635,14 +692,36 @@ async def _context_set(workspace_root: str) -> str:
             f"  Database: Not found (run context(action='init') to create)"
         )
 
-    # Set database path in both persistent context and os.environ
-    _workspace_context["BEADS_DB"] = db_path
-    os.environ["BEADS_DB"] = db_path
+    project_root, backend = project
 
+    # BEADS_DB only applies to SQLite. Dolt backends use metadata.json,
+    # which the bd CLI reads directly.
+    if backend == "sqlite":
+        db_path = _find_beads_db(project_root)
+        if db_path:
+            _workspace_context["BEADS_DB"] = db_path
+            os.environ["BEADS_DB"] = db_path
+            return (
+                f"Context set successfully:\n"
+                f"  Workspace root: {resolved_root}\n"
+                f"  Database: {db_path}"
+            )
+        else:
+            _workspace_context.pop("BEADS_DB", None)
+            os.environ.pop("BEADS_DB", None)
+            return (
+                f"Context set successfully:\n"
+                f"  Workspace root: {resolved_root}\n"
+                f"  Database: Not found (run context(action='init') to create)"
+            )
+
+    # Dolt or unknown — clear any stale BEADS_DB and report the project root.
+    _workspace_context.pop("BEADS_DB", None)
+    os.environ.pop("BEADS_DB", None)
     return (
         f"Context set successfully:\n"
         f"  Workspace root: {resolved_root}\n"
-        f"  Database: {db_path}"
+        f"  Project: {os.path.join(project_root, '.beads')} (backend: {backend})"
     )
 
 
@@ -771,6 +850,7 @@ def _truncate_description(issue: Issue, max_length: int) -> Issue:
 async def ready_work(
     limit: int = 10,
     priority: int | None = None,
+    issue_type: str | None = None,
     assignee: str | None = None,
     labels: list[str] | None = None,
     labels_any: list[str] | None = None,
@@ -786,6 +866,7 @@ async def ready_work(
     Args:
         limit: Maximum issues to return (1-100, default 10)
         priority: Filter by priority level (0-4)
+        issue_type: Filter by type (task, bug, feature, epic, chore, decision, merge-request, or custom)
         assignee: Filter by assignee
         labels: Filter by labels (AND: must have ALL specified labels)
         labels_any: Filter by labels (OR: must have at least one)
@@ -802,6 +883,7 @@ async def ready_work(
     issues = await beads_ready_work(
         limit=limit,
         priority=priority,
+        issue_type=issue_type,
         assignee=assignee,
         labels=labels,
         labels_any=labels_any,
@@ -862,7 +944,7 @@ async def list_issues(
     Args:
         status: Filter by status (open, in_progress, blocked, closed)
         priority: Filter by priority level (0-4)
-        issue_type: Filter by type (bug, feature, task, epic, chore)
+        issue_type: Filter by type (bug, feature, task, epic, chore, decision)
         assignee: Filter by assignee
         labels: Filter by labels (AND: must have ALL specified labels)
         labels_any: Filter by labels (OR: must have at least one)
@@ -964,7 +1046,7 @@ async def show_issue(
 
 @mcp.tool(
     name="create",
-    description="""Create a new issue (bug, feature, task, epic, or chore) with optional design,
+    description="""Create a new issue (bug, feature, task, epic, chore, or decision) with optional design,
 acceptance criteria, and dependencies.""",
 )
 @with_workspace
@@ -1009,9 +1091,33 @@ async def create_issue(
 
 
 @mcp.tool(
+    name="claim",
+    description="Atomically claim an issue for work (assignee + in_progress in one CAS-style operation).",
+)
+@with_workspace
+@require_context
+async def claim_issue(
+    issue_id: str,
+    workspace_root: str | None = None,
+    brief: bool = True,
+) -> Issue | OperationResult | None:
+    """Atomically claim an issue for work.
+
+    Args:
+        brief: If True (default), return minimal OperationResult; if False, return full Issue
+    """
+    issue = await beads_claim_issue(issue_id=issue_id)
+    if issue is None:
+        return None
+    if brief:
+        return OperationResult(id=issue.id, action="claimed")
+    return issue
+
+
+@mcp.tool(
     name="update",
     description="""Update an existing issue's status, priority, assignee, description, design notes,
-or acceptance criteria. Use this to claim work (set status=in_progress).""",
+or acceptance criteria. For atomic start-work semantics, prefer claim(issue_id).""",
 )
 @with_workspace
 @require_context
@@ -1114,8 +1220,10 @@ async def reopen_issue(
 
 @mcp.tool(
     name="dep",
-    description="""Add a dependency between issues. Types: blocks (hard blocker),
-related (soft link), parent-child (epic/subtask), discovered-from (found during work).""",
+    description="""Add a dependency between issues. Common types: blocks (hard blocker),
+related (soft link), parent-child (epic/subtask), discovered-from (found during work).
+The full set of supported dep types lives in internal/types/types.go and is
+validated by the bd CLI; pass any of them as a string.""",
 )
 @with_workspace
 @require_context

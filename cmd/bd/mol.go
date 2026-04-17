@@ -18,9 +18,9 @@ import (
 //   - Compound: Result of bonding
 //
 // Usage:
-//   bd mol catalog                        # List available protos
 //   bd mol show <id>                      # Show proto/molecule structure
-//   bd mol spawn <id> --var key=value     # Instantiate proto → molecule
+//   bd mol pour <id> --var key=value      # Instantiate proto → persistent mol
+//   bd mol wisp <id> --var key=value      # Instantiate proto → ephemeral wisp
 
 // MoleculeLabel is the label used to identify molecules (templates)
 // Molecules use the same label as templates - they ARE templates with workflow semantics
@@ -47,12 +47,15 @@ The molecule metaphor:
   - Distilling extracts a proto from an ad-hoc epic
 
 Commands:
-  catalog  List available protos
-  show     Show proto/molecule structure and variables
-  spawn    Instantiate a proto → molecule
-  bond     Polymorphic combine: proto+proto, proto+mol, mol+mol
-  run      Spawn + assign + pin for durable execution
-  distill  Extract proto from ad-hoc epic (reverse of spawn)`,
+  show       Show proto/molecule structure and variables
+  pour       Instantiate proto as persistent mol (liquid phase)
+  wisp       Instantiate proto as ephemeral wisp (vapor phase)
+  bond       Polymorphic combine: proto+proto, proto+mol, mol+mol
+  squash     Condense molecule to digest
+  burn       Discard wisp
+  distill    Extract proto from ad-hoc epic
+
+Use "bd formula list" to list available formulas.`,
 }
 
 // =============================================================================
@@ -63,8 +66,22 @@ Commands:
 // This instantiates a proto (template) into a molecule (real issues).
 // Wraps cloneSubgraph from template.go and returns InstantiateResult.
 // If ephemeral is true, spawned issues are marked for bulk deletion when closed.
-func spawnMolecule(ctx context.Context, s storage.Storage, subgraph *MoleculeSubgraph, vars map[string]string, assignee string, actorName string, ephemeral bool) (*InstantiateResult, error) {
-	return cloneSubgraph(ctx, s, subgraph, vars, assignee, actorName, ephemeral)
+// The prefix parameter overrides the default issue prefix (bd-hobo: distinct prefixes).
+func spawnMolecule(ctx context.Context, s storage.DoltStorage, subgraph *MoleculeSubgraph, vars map[string]string, assignee string, actorName string, ephemeral bool, prefix string) (*InstantiateResult, error) {
+	opts := CloneOptions{
+		Vars:      vars,
+		Assignee:  assignee,
+		Actor:     actorName,
+		Ephemeral: ephemeral,
+		Prefix:    prefix,
+	}
+	return cloneSubgraph(ctx, s, subgraph, opts)
+}
+
+// spawnMoleculeWithOptions creates new issues from the proto using CloneOptions.
+// This allows full control over dynamic bonding, variable substitution, and wisp phase.
+func spawnMoleculeWithOptions(ctx context.Context, s storage.DoltStorage, subgraph *MoleculeSubgraph, opts CloneOptions) (*InstantiateResult, error) {
+	return cloneSubgraph(ctx, s, subgraph, opts)
 }
 
 // printMoleculeTree prints the molecule structure as a tree

@@ -2,47 +2,26 @@ package doctor
 
 import (
 	"bufio"
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
 
-	_ "github.com/ncruces/go-sqlite3/driver"
-	_ "github.com/ncruces/go-sqlite3/embed"
-	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
 	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
-// CheckIDFormat checks whether issues use hash-based or sequential IDs
+// CheckIDFormat checks whether issues use hash-based or sequential IDs.
+// Opens its own store; prefer CheckIDFormatWithStore when a shared store is available.
 func CheckIDFormat(path string) DoctorCheck {
-	beadsDir := filepath.Join(path, ".beads")
+	_, beadsDir := getBackendAndBeadsDir(path)
 
-	// Check metadata.json first for custom database name
-	var dbPath string
-	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
-		dbPath = cfg.DatabasePath(beadsDir)
-	} else {
-		// Fall back to canonical database name
-		dbPath = filepath.Join(beadsDir, beads.CanonicalDatabaseName)
-	}
-
-	// Check if using JSONL-only mode
-	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		// Check if JSONL exists (--no-db mode)
-		jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
-		if _, err := os.Stat(jsonlPath); err == nil {
-			return DoctorCheck{
-				Name:    "Issue IDs",
-				Status:  StatusOK,
-				Message: "N/A (JSONL-only mode)",
-			}
-		}
-		// No database and no JSONL
+	doltPath := getDatabasePath(beadsDir)
+	if _, err := os.Stat(doltPath); os.IsNotExist(err) {
 		return DoctorCheck{
 			Name:    "Issue IDs",
 			Status:  StatusOK,
@@ -50,24 +29,46 @@ func CheckIDFormat(path string) DoctorCheck {
 		}
 	}
 
-	// Open database
-	db, err := sql.Open("sqlite3", "file:"+dbPath+"?mode=ro")
+	ctx := context.Background()
+	store, err := dolt.NewFromConfigWithCLIOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Issue IDs",
 			Status:  StatusError,
 			Message: "Unable to open database",
+			Detail:  err.Error(),
 		}
 	}
-	defer func() { _ = db.Close() }() // Intentionally ignore close error
+	defer func() { _ = store.Close() }()
+
+	return checkIDFormatWithStore(store)
+}
+
+// CheckIDFormatWithStore checks ID format using a shared store (GH#2636).
+func CheckIDFormatWithStore(ss *SharedStore) DoctorCheck {
+	store := ss.Store()
+	if store == nil {
+		return DoctorCheck{
+			Name:    "Issue IDs",
+			Status:  StatusOK,
+			Message: "No issues yet (will use hash-based IDs)",
+		}
+	}
+	return checkIDFormatWithStore(store)
+}
+
+func checkIDFormatWithStore(store *dolt.DoltStore) DoctorCheck {
+	ctx := context.Background()
+	db := store.UnderlyingDB()
 
 	// Get sample of issues to check ID format (up to 10 for pattern analysis)
-	rows, err := db.Query("SELECT id FROM issues ORDER BY created_at LIMIT 10")
+	rows, err := db.QueryContext(ctx, "SELECT id FROM issues ORDER BY created_at LIMIT 10")
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Issue IDs",
 			Status:  StatusError,
 			Message: "Unable to query issues",
+			Detail:  err.Error(),
 		}
 	}
 	defer rows.Close()
@@ -77,6 +78,14 @@ func CheckIDFormat(path string) DoctorCheck {
 		var id string
 		if err := rows.Scan(&id); err == nil {
 			issueIDs = append(issueIDs, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return DoctorCheck{
+			Name:    "Issue IDs",
+			Status:  StatusWarning,
+			Message: "Row iteration error",
+			Detail:  err.Error(),
 		}
 	}
 
@@ -97,22 +106,20 @@ func CheckIDFormat(path string) DoctorCheck {
 		}
 	}
 
-	// Sequential IDs - recommend migration
 	return DoctorCheck{
 		Name:    "Issue IDs",
 		Status:  StatusWarning,
-		Message: "sequential (e.g., bd-1, bd-2, ...)",
-		Fix:     "Run 'bd migrate --to-hash-ids' to upgrade (prevents ID collisions in multi-worker scenarios)",
+		Message: "sequential IDs detected — consider migrating to hash-based IDs",
 	}
 }
 
-// CheckDependencyCycles checks for circular dependencies in the issue graph
+// CheckDependencyCycles checks for circular dependencies in the issue graph.
+// Opens its own store; prefer CheckDependencyCyclesWithStore when a shared store is available.
 func CheckDependencyCycles(path string) DoctorCheck {
-	beadsDir := filepath.Join(path, ".beads")
-	dbPath := filepath.Join(beadsDir, beads.CanonicalDatabaseName)
+	_, beadsDir := getBackendAndBeadsDir(path)
 
-	// If no database, skip this check
-	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+	doltPath := getDatabasePath(beadsDir)
+	if _, err := os.Stat(doltPath); os.IsNotExist(err) {
 		return DoctorCheck{
 			Name:    "Dependency Cycles",
 			Status:  StatusOK,
@@ -120,8 +127,8 @@ func CheckDependencyCycles(path string) DoctorCheck {
 		}
 	}
 
-	// Open database to check for cycles
-	db, err := sql.Open("sqlite3", dbPath)
+	ctx := context.Background()
+	store, err := dolt.NewFromConfigWithCLIOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Dependency Cycles",
@@ -130,16 +137,35 @@ func CheckDependencyCycles(path string) DoctorCheck {
 			Detail:  err.Error(),
 		}
 	}
-	defer db.Close()
+	defer func() { _ = store.Close() }()
 
-	// Query for cycles using simplified SQL
+	return checkDependencyCyclesWithStore(store)
+}
+
+// CheckDependencyCyclesWithStore checks for cycles using a shared store (GH#2636).
+func CheckDependencyCyclesWithStore(ss *SharedStore) DoctorCheck {
+	store := ss.Store()
+	if store == nil {
+		return DoctorCheck{
+			Name:    "Dependency Cycles",
+			Status:  StatusOK,
+			Message: "N/A (no database)",
+		}
+	}
+	return checkDependencyCyclesWithStore(store)
+}
+
+func checkDependencyCyclesWithStore(store *dolt.DoltStore) DoctorCheck {
+	db := store.UnderlyingDB()
+
+	// Query for cycles using simplified SQL (CONCAT for Dolt/MySQL compatibility)
 	query := `
 		WITH RECURSIVE paths AS (
 			SELECT
 				issue_id,
 				depends_on_id,
 				issue_id as start_id,
-				issue_id || '→' || depends_on_id as path,
+				CONCAT(issue_id, '→', depends_on_id) as path,
 				0 as depth
 			FROM dependencies
 
@@ -149,12 +175,12 @@ func CheckDependencyCycles(path string) DoctorCheck {
 				d.issue_id,
 				d.depends_on_id,
 				p.start_id,
-				p.path || '→' || d.depends_on_id,
+				CONCAT(p.path, '→', d.depends_on_id),
 				p.depth + 1
 			FROM dependencies d
 			JOIN paths p ON d.issue_id = p.depends_on_id
 			WHERE p.depth < 100
-			  AND p.path NOT LIKE '%' || d.depends_on_id || '→%'
+			  AND p.path NOT LIKE CONCAT('%', d.depends_on_id, '→%')
 		)
 		SELECT DISTINCT start_id
 		FROM paths
@@ -183,6 +209,14 @@ func CheckDependencyCycles(path string) DoctorCheck {
 			firstCycle = startID
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return DoctorCheck{
+			Name:    "Dependency Cycles",
+			Status:  StatusWarning,
+			Message: "Row iteration error",
+			Detail:  err.Error(),
+		}
+	}
 
 	if cycleCount == 0 {
 		return DoctorCheck{
@@ -201,108 +235,10 @@ func CheckDependencyCycles(path string) DoctorCheck {
 	}
 }
 
-// CheckTombstones checks the health of tombstone records
-// Reports: total tombstones, expiring soon (within 7 days), already expired
-func CheckTombstones(path string) DoctorCheck {
-	beadsDir := filepath.Join(path, ".beads")
-	dbPath := filepath.Join(beadsDir, beads.CanonicalDatabaseName)
-
-	// Skip if database doesn't exist
-	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		return DoctorCheck{
-			Name:    "Tombstones",
-			Status:  StatusOK,
-			Message: "N/A (no database)",
-		}
-	}
-
-	db, err := sql.Open("sqlite3", dbPath)
-	if err != nil {
-		return DoctorCheck{
-			Name:    "Tombstones",
-			Status:  StatusWarning,
-			Message: "Unable to open database",
-			Detail:  err.Error(),
-		}
-	}
-	defer db.Close()
-
-	// Query tombstone statistics
-	var totalTombstones int
-	err = db.QueryRow("SELECT COUNT(*) FROM issues WHERE status = 'tombstone'").Scan(&totalTombstones)
-	if err != nil {
-		// Might be old schema without tombstone support
-		return DoctorCheck{
-			Name:    "Tombstones",
-			Status:  StatusOK,
-			Message: "N/A (schema may not support tombstones)",
-		}
-	}
-
-	if totalTombstones == 0 {
-		return DoctorCheck{
-			Name:    "Tombstones",
-			Status:  StatusOK,
-			Message: "None (no deleted issues)",
-		}
-	}
-
-	// Check for tombstones expiring within 7 days
-	// Default TTL is 30 days, so expiring soon means deleted_at older than 23 days ago
-	expiringThreshold := time.Now().Add(-23 * 24 * time.Hour).Format(time.RFC3339)
-	expiredThreshold := time.Now().Add(-30 * 24 * time.Hour).Format(time.RFC3339)
-
-	var expiringSoon, alreadyExpired int
-	err = db.QueryRow(`
-		SELECT COUNT(*) FROM issues
-		WHERE status = 'tombstone'
-		AND deleted_at IS NOT NULL
-		AND deleted_at < ?
-		AND deleted_at >= ?
-	`, expiringThreshold, expiredThreshold).Scan(&expiringSoon)
-	if err != nil {
-		expiringSoon = 0
-	}
-
-	err = db.QueryRow(`
-		SELECT COUNT(*) FROM issues
-		WHERE status = 'tombstone'
-		AND deleted_at IS NOT NULL
-		AND deleted_at < ?
-	`, expiredThreshold).Scan(&alreadyExpired)
-	if err != nil {
-		alreadyExpired = 0
-	}
-
-	// Build status message
-	if alreadyExpired > 0 {
-		return DoctorCheck{
-			Name:    "Tombstones",
-			Status:  StatusWarning,
-			Message: fmt.Sprintf("%d total, %d expired", totalTombstones, alreadyExpired),
-			Detail:  "Expired tombstones will be removed on next compact",
-			Fix:     "Run 'bd compact' to prune expired tombstones",
-		}
-	}
-
-	if expiringSoon > 0 {
-		return DoctorCheck{
-			Name:    "Tombstones",
-			Status:  StatusOK,
-			Message: fmt.Sprintf("%d total, %d expiring within 7 days", totalTombstones, expiringSoon),
-		}
-	}
-
-	return DoctorCheck{
-		Name:    "Tombstones",
-		Status:  StatusOK,
-		Message: fmt.Sprintf("%d total", totalTombstones),
-	}
-}
-
-// CheckDeletionsManifest checks the status of deletions.jsonl and suggests migration to tombstones
+// CheckDeletionsManifest checks the status of the legacy deletions.jsonl file
 func CheckDeletionsManifest(path string) DoctorCheck {
-	beadsDir := filepath.Join(path, ".beads")
+	// Follow redirect to resolve actual beads directory (bd-tvus fix)
+	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
 	// Skip if .beads doesn't exist
 	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
@@ -346,14 +282,13 @@ func CheckDeletionsManifest(path string) DoctorCheck {
 					count++
 				}
 			}
-			// Suggest migration to inline tombstones
 			if count > 0 {
 				return DoctorCheck{
 					Name:    "Deletions Manifest",
 					Status:  StatusWarning,
 					Message: fmt.Sprintf("Legacy format (%d entries)", count),
-					Detail:  "deletions.jsonl is deprecated in favor of inline tombstones",
-					Fix:     "Run 'bd migrate-tombstones' to convert to inline tombstones",
+					Detail:  "deletions.jsonl is a legacy format no longer used",
+					Fix:     "Safe to delete deletions.jsonl (Dolt handles delete propagation natively)",
 				}
 			}
 			return DoctorCheck{
@@ -364,54 +299,33 @@ func CheckDeletionsManifest(path string) DoctorCheck {
 		}
 	}
 
-	// deletions.jsonl doesn't exist - this is the expected state with tombstones
+	// deletions.jsonl doesn't exist - this is the expected state
 	// Check for .migrated file to confirm migration happened
 	migratedPath := filepath.Join(beadsDir, "deletions.jsonl.migrated")
 	if _, err := os.Stat(migratedPath); err == nil {
 		return DoctorCheck{
 			Name:    "Deletions Manifest",
 			Status:  StatusOK,
-			Message: "Migrated to tombstones",
+			Message: "Migrated (legacy file removed)",
 		}
 	}
 
-	// No deletions.jsonl and no .migrated file - check if JSONL exists
-	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
-	if _, err := os.Stat(jsonlPath); os.IsNotExist(err) {
-		jsonlPath = filepath.Join(beadsDir, "beads.jsonl")
-		if _, err := os.Stat(jsonlPath); os.IsNotExist(err) {
-			return DoctorCheck{
-				Name:    "Deletions Manifest",
-				Status:  StatusOK,
-				Message: "N/A (no JSONL file)",
-			}
-		}
-	}
-
-	// JSONL exists but no deletions tracking - this is fine for new repos using tombstones
+	// No deletions.jsonl - expected for Dolt-native repos
 	return DoctorCheck{
 		Name:    "Deletions Manifest",
 		Status:  StatusOK,
-		Message: "Using inline tombstones",
+		Message: "Not needed (Dolt-native)",
 	}
 }
 
 // CheckRepoFingerprint validates that the database belongs to this repository.
 // This detects when a .beads directory was copied from another repo or when
 // the git remote URL changed. A mismatch can cause data loss during sync.
+// Opens its own store; prefer CheckRepoFingerprintWithStore when a shared store is available.
 func CheckRepoFingerprint(path string) DoctorCheck {
-	beadsDir := filepath.Join(path, ".beads")
+	_, beadsDir := getBackendAndBeadsDir(path)
 
-	// Get database path
-	var dbPath string
-	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
-		dbPath = cfg.DatabasePath(beadsDir)
-	} else {
-		dbPath = filepath.Join(beadsDir, beads.CanonicalDatabaseName)
-	}
-
-	// Skip if database doesn't exist
-	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+	if info, err := os.Stat(getDatabasePath(beadsDir)); err != nil || !info.IsDir() {
 		return DoctorCheck{
 			Name:    "Repo Fingerprint",
 			Status:  StatusOK,
@@ -419,8 +333,8 @@ func CheckRepoFingerprint(path string) DoctorCheck {
 		}
 	}
 
-	// Open database
-	db, err := sql.Open("sqlite3", "file:"+dbPath+"?mode=ro")
+	ctx := context.Background()
+	store, err := dolt.NewFromConfigWithCLIOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Repo Fingerprint",
@@ -429,22 +343,29 @@ func CheckRepoFingerprint(path string) DoctorCheck {
 			Detail:  err.Error(),
 		}
 	}
-	defer db.Close()
+	defer func() { _ = store.Close() }()
 
-	// Get stored repo ID
-	var storedRepoID string
-	err = db.QueryRow("SELECT value FROM metadata WHERE key = 'repo_id'").Scan(&storedRepoID)
-	if err != nil {
-		if err == sql.ErrNoRows || strings.Contains(err.Error(), "no such table") {
-			// Legacy database without repo_id
-			return DoctorCheck{
-				Name:    "Repo Fingerprint",
-				Status:  StatusWarning,
-				Message: "Legacy database (no fingerprint)",
-				Detail:  "Database was created before version 0.17.5",
-				Fix:     "Run 'bd migrate --update-repo-id' to add fingerprint",
-			}
+	return checkRepoFingerprintWithStore(store, path)
+}
+
+// CheckRepoFingerprintWithStore checks repo fingerprint using a shared store (GH#2636).
+func CheckRepoFingerprintWithStore(ss *SharedStore, path string) DoctorCheck {
+	store := ss.Store()
+	if store == nil {
+		return DoctorCheck{
+			Name:    "Repo Fingerprint",
+			Status:  StatusOK,
+			Message: "N/A (no database)",
 		}
+	}
+	return checkRepoFingerprintWithStore(store, path)
+}
+
+func checkRepoFingerprintWithStore(store *dolt.DoltStore, path string) DoctorCheck {
+	ctx := context.Background()
+
+	storedRepoID, err := store.GetMetadata(ctx, "repo_id")
+	if err != nil {
 		return DoctorCheck{
 			Name:    "Repo Fingerprint",
 			Status:  StatusWarning,
@@ -453,20 +374,25 @@ func CheckRepoFingerprint(path string) DoctorCheck {
 		}
 	}
 
-	// If repo_id is empty, treat as legacy
 	if storedRepoID == "" {
 		return DoctorCheck{
 			Name:    "Repo Fingerprint",
 			Status:  StatusWarning,
-			Message: "Legacy database (empty fingerprint)",
-			Detail:  "Database was created before version 0.17.5",
-			Fix:     "Run 'bd migrate --update-repo-id' to add fingerprint",
+			Message: "Missing repo fingerprint metadata",
+			Detail:  "Storage: Dolt",
+			Fix:     "Run 'bd doctor --fix' to repair metadata",
 		}
 	}
 
-	// Compute current repo ID
-	currentRepoID, err := beads.ComputeRepoID()
+	currentRepoID, err := beads.ComputeRepoIDForPath(path)
 	if err != nil {
+		if strings.Contains(err.Error(), "not a git repository") {
+			return DoctorCheck{
+				Name:    "Repo Fingerprint",
+				Status:  StatusOK,
+				Message: "N/A (not a git repository)",
+			}
+		}
 		return DoctorCheck{
 			Name:    "Repo Fingerprint",
 			Status:  StatusWarning,
@@ -475,13 +401,12 @@ func CheckRepoFingerprint(path string) DoctorCheck {
 		}
 	}
 
-	// Compare
 	if storedRepoID != currentRepoID {
 		return DoctorCheck{
 			Name:    "Repo Fingerprint",
 			Status:  StatusError,
 			Message: "Database belongs to different repository",
-			Detail:  fmt.Sprintf("stored: %s, current: %s", storedRepoID[:8], currentRepoID[:8]),
+			Detail:  fmt.Sprintf("stored: %s, current: %s", truncateID(storedRepoID), truncateID(currentRepoID)),
 			Fix:     "Run 'bd migrate --update-repo-id' if URL changed, or 'rm -rf .beads && bd init' if wrong database",
 		}
 	}
@@ -489,28 +414,27 @@ func CheckRepoFingerprint(path string) DoctorCheck {
 	return DoctorCheck{
 		Name:    "Repo Fingerprint",
 		Status:  StatusOK,
-		Message: fmt.Sprintf("Verified (%s)", currentRepoID[:8]),
+		Message: fmt.Sprintf("Verified (%s)", truncateID(currentRepoID)),
 	}
 }
 
-// Fix functions
-
-// FixMigrateTombstones converts legacy deletions.jsonl entries to inline tombstones
-func FixMigrateTombstones(path string) error {
-	return fix.MigrateTombstones(path)
-}
-
 // Helper functions
+
+// truncateID safely truncates an ID to at most 8 characters for display.
+func truncateID(id string) string {
+	if len(id) <= 8 {
+		return id
+	}
+	return id[:8]
+}
 
 // DetectHashBasedIDs uses multiple heuristics to determine if the database uses hash-based IDs.
 // This is more robust than checking a single ID's format, since base36 hash IDs can be all-numeric.
 func DetectHashBasedIDs(db *sql.DB, sampleIDs []string) bool {
 	// Heuristic 1: Check for child_counters table (added for hash ID support)
-	var tableName string
-	err := db.QueryRow(`
-		SELECT name FROM sqlite_master
-		WHERE type='table' AND name='child_counters'
-	`).Scan(&tableName)
+	// Use a direct query to check for the table's existence.
+	var count int
+	err := db.QueryRow("SELECT COUNT(*) FROM child_counters").Scan(&count)
 	if err == nil {
 		// child_counters table exists - this is a strong indicator of hash IDs
 		return true

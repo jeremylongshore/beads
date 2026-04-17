@@ -8,7 +8,9 @@ Thank you for your interest in contributing to bd! This document provides guidel
 
 - Go 1.24 or later
 - Git
+- A C compiler (CGO is required for the embedded Dolt database)
 - (Optional) golangci-lint for local linting
+- ICU headers are **not required** for building -- see [docs/ICU-POLICY.md](docs/ICU-POLICY.md)
 
 ### Getting Started
 
@@ -17,8 +19,8 @@ Thank you for your interest in contributing to bd! This document provides guidel
 git clone https://github.com/steveyegge/beads
 cd beads
 
-# Build the project
-go build -o bd ./cmd/bd
+# Build the project (uses gms_pure_go tag via Makefile)
+make build
 
 # Run tests
 go test ./...
@@ -27,7 +29,7 @@ go test ./...
 go test -race ./...
 
 # Build and install locally
-go install ./cmd/bd
+make install
 ```
 
 ## Project Structure
@@ -38,7 +40,7 @@ beads/
 ├── internal/
 │   ├── types/           # Core data types (Issue, Dependency, etc.)
 │   └── storage/         # Storage interface and implementations
-│       └── sqlite/      # SQLite backend
+│       └── dolt/        # Dolt database backend
 ├── .golangci.yml        # Linter configuration
 └── .github/workflows/   # CI/CD pipelines
 ```
@@ -54,7 +56,7 @@ go test -v -coverprofile=coverage.out ./...
 go tool cover -html=coverage.out
 
 # Run specific package tests
-go test ./internal/storage/sqlite -v
+go test ./internal/storage/dolt/ -v
 
 # Run tests with race detection
 go test -race ./...
@@ -113,26 +115,22 @@ Add cycle detection for dependency graphs
 - Update documentation with examples
 ```
 
-### Important: Don't Include .beads/issues.jsonl Changes
+### Pull Request Hygiene
 
-The `.beads/issues.jsonl` file is the project's issue database. **Do not include changes to this file in your PR.** CI will fail if this file is modified.
-
-If you accidentally committed changes to this file, fix it with:
-
-```bash
-git checkout origin/main -- .beads/issues.jsonl
-git commit --amend
-git push --force
-```
-
-### Pull Requests
+**One issue per PR, and one PR per issue.** No piggybacking or riders — each PR should address exactly one thing.
 
 - Keep PRs focused on a single feature or fix
+- Do not include unrelated changes, cleanup, or "while I'm here" improvements
+- Do not include `.beads/` data (database, JSONL) in your PR
+- Make sure there are no extra generated or garbage files in your diff
 - Include tests for new functionality
 - Update documentation as needed
 - Ensure CI passes before requesting review
 - Respond to review feedback promptly
-- **Do not include `.beads/issues.jsonl` changes** (see above)
+
+### ZFC (Zero Framework Cognition)
+
+If you are contributing code that involves AI decision-making or orchestration, understand and follow the [ZFC principles](https://steve-yegge.medium.com/zero-framework-cognition-a-way-to-build-resilient-ai-applications-56b090ed3e69). In short: keep the smarts in the AI models, keep the code as dumb orchestration. Do not add heuristics, keyword matching, ranking logic, or semantic analysis in application code — delegate cognitive decisions to AI.
 
 ## Testing Guidelines
 
@@ -178,7 +176,58 @@ go test -race -coverprofile=coverage.out ./...
 - Use `t.Run()` for subtests to organize related test cases
 - Mark slow tests with `if testing.Short() { t.Skip("slow test") }`
 
-Example:
+### CGO vs Non-CGO Tests
+
+Tests are split into two categories based on whether they need the embedded Dolt database (which requires CGO):
+
+- **Non-CGO tests** (no build tag): Unit tests for CLI parsing, helpers, and pure logic. These run everywhere.
+- **CGO tests** (`//go:build cgo`): Integration tests that create a real Dolt database. Files often use the `_embedded_test.go` suffix.
+
+```bash
+# Fast non-CGO tests (recommended for development)
+make test                     # or: go test -short ./...
+
+# Full CGO-enabled suite (before committing)
+make test-full-cgo            # or: ./scripts/test-cgo.sh ./...
+
+# Run a specific CGO test
+./scripts/test-cgo.sh -run '^TestMyFeature$' ./cmd/bd/...
+```
+
+On macOS, always use the script or Make target for CGO tests -- they configure the required ICU linker flags automatically.
+
+### ICU and Build Tags
+
+All production builds use `-tags gms_pure_go` to avoid ICU runtime dependencies.
+**Do not add ICU linker flags to the Makefile or `.buildflags`.**
+See [docs/ICU-POLICY.md](docs/ICU-POLICY.md) for the full policy and rationale.
+
+### Test Isolation with `t.TempDir()`
+
+Database tests use `t.TempDir()` for isolation so each test gets a clean environment and nothing touches the production database:
+
+```go
+func TestMyFeature(t *testing.T) {
+    tmpDir := t.TempDir()
+    dbPath := filepath.Join(tmpDir, "test.db")
+    store := newTestStoreWithPrefix(t, dbPath, "bd")
+
+    ctx := context.Background()
+    issue := &types.Issue{
+        ID:     "bd-1",
+        Title:  "Test issue",
+        Status: types.StatusOpen,
+    }
+    if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+        t.Fatalf("CreateIssue failed: %v", err)
+    }
+    // ... assertions ...
+}
+```
+
+Test helpers in `cmd/bd/test_helpers_test.go` provide database setup functions like `newTestStore`, `newTestStoreWithPrefix`, and `newTestStoreSharedBranch` (which uses branch-per-test isolation to avoid expensive CREATE/DROP DATABASE overhead).
+
+### Table-Driven Test Example
 
 ```go
 func TestIssueValidation(t *testing.T) {
@@ -236,6 +285,17 @@ When proposing new features:
 - Consider backwards compatibility
 - Discuss alternatives you've considered
 
+## Your PR Will Not Be Overwritten
+
+This project uses AI agents for maintenance. We've established strict rules to protect contributor work:
+
+- **Your PR has priority.** If you've submitted a PR, agents must review and build on your work — not rewrite it from scratch.
+- **Your tests matter.** Agents must preserve contributor tests unless they're actually wrong.
+- **You'll get attribution.** Your commits and `Co-authored-by:` will be preserved.
+- **No silent closes.** Your PR will never be auto-closed by a parallel rewrite. If changes are needed, they'll be discussed on your PR.
+
+If any of this goes wrong, please open an issue — we take contributor experience seriously.
+
 ## Code Review Process
 
 All contributions go through code review:
@@ -262,14 +322,27 @@ go build -o bd ./cmd/bd && ./bd init --prefix test
 ### Database Inspection
 
 ```bash
-# Inspect the SQLite database directly
-sqlite3 .beads/test.db
-
-# Useful queries
-SELECT * FROM issues;
-SELECT * FROM dependencies;
-SELECT * FROM events WHERE issue_id = 'test-1';
+# Inspect the Dolt database directly
+bd query "SELECT * FROM issues"
+bd query "SELECT * FROM dependencies"
+bd query "SELECT * FROM events WHERE issue_id = 'test-1'"
 ```
+
+### Updating Nix flake.lock (without nix installed)
+
+The `flake.lock` file pins a specific nixpkgs revision. When `go.mod` bumps the Go version beyond what's in the pinned nixpkgs, the Nix CI job will fail. To update `flake.lock` without installing nix locally, use Docker:
+
+```bash
+# Update flake.lock
+docker run --rm -v $(pwd):/workspace -w /workspace nixos/nix \
+  sh -c 'echo "experimental-features = nix-command flakes" >> /etc/nix/nix.conf && nix flake update'
+
+# Verify the build works
+docker run --rm -v $(pwd):/workspace -w /workspace nixos/nix \
+  sh -c 'echo "experimental-features = nix-command flakes" >> /etc/nix/nix.conf && nix build .#default && ./result/bin/bd version'
+```
+
+If the build fails with a `vendorHash` mismatch, update `default.nix` with the `got:` hash from the error message and rebuild.
 
 ### Debugging
 

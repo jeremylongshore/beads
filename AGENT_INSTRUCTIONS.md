@@ -10,7 +10,7 @@ This document contains detailed operational instructions for AI agents working o
 
 - **Go version**: 1.24+
 - **Linting**: `golangci-lint run ./...` (baseline warnings documented in [docs/LINTING.md](docs/LINTING.md))
-- **Testing**: All new features need tests (`go test -short ./...` for local, full tests run in CI)
+- **Testing**: All new features need tests (`make test` for the normal local/CI path, `make test-icu-path` only when intentionally exercising the opt-in ICU regex path)
 - **Documentation**: Update relevant .md files
 
 ### File Organization
@@ -21,7 +21,7 @@ beads/
 ├── internal/
 │   ├── types/           # Core data types
 │   └── storage/         # Storage layer
-│       └── sqlite/      # SQLite implementation
+│       └── dolt/        # Dolt implementation
 ├── examples/            # Integration examples
 └── *.md                 # Documentation
 ```
@@ -34,11 +34,11 @@ beads/
 
 ```bash
 # Create test issues in isolated database
-BEADS_DB=/tmp/test.db ./bd init --quiet --prefix test
-BEADS_DB=/tmp/test.db ./bd create "Test issue" -p 1
+BEADS_DB=/tmp/test.db bd init --quiet --prefix test
+BEADS_DB=/tmp/test.db bd create "Test issue" -p 1
 
 # Or for quick testing
-BEADS_DB=/tmp/test.db ./bd create "Test feature" -p 1
+BEADS_DB=/tmp/test.db bd create "Test feature" -p 1
 ```
 
 **For automated tests**, use `t.TempDir()` in Go tests:
@@ -52,14 +52,24 @@ func TestMyFeature(t *testing.T) {
 }
 ```
 
+**Git test isolation:** For tests that create temporary git repos, force repo-local hooks:
+
+```bash
+git config core.hooksPath .git/hooks
+```
+
+Do not rely on the developer's global git config. Global `core.hooksPath` can leak
+into temp repos and produce flaky test behavior.
+
 **Warning:** bd will warn you when creating issues with "Test" prefix in the production database. Always use `BEADS_DB` for manual testing.
 
 ### Before Committing
 
-1. **Run tests**: `go test -short ./...` (full tests run in CI)
+1. **Run tests**: `make test` (or `./scripts/test.sh`)
+   - Only if intentionally exercising the ICU regex path: `make test-icu-path`
 2. **Run linter**: `golangci-lint run ./...` (ignore baseline warnings)
 3. **Update docs**: If you changed behavior, update README.md or other docs
-4. **Commit**: Issues auto-sync to `.beads/issues.jsonl` and import after pull
+4. **Commit**: With git hooks installed (`bd hooks install`), Dolt changes are auto-committed
 
 ### Commit Message Convention
 
@@ -74,23 +84,55 @@ This enables `bd doctor` to detect **orphaned issues** - work that was committed
 
 ### Git Workflow
 
-**Auto-sync provides batching!** bd automatically:
+bd uses **Dolt** as its primary database. Changes are committed to Dolt history automatically (one Dolt commit per write command).
 
-- **Exports** to JSONL after CRUD operations (30-second debounce for batching)
-- **Imports** from JSONL when it's newer than DB (e.g., after `git pull`)
-- **Daemon commits/pushes** every 5 seconds (if `--auto-commit` / `--auto-push` enabled)
-
-The 30-second debounce provides a **transaction window** for batch operations - multiple issue changes within 30 seconds get flushed together, avoiding commit spam.
+**Install git hooks** for automatic sync:
+```bash
+bd hooks install
+```
 
 ### Git Integration
 
-**Auto-sync**: bd automatically exports to JSONL (30s debounce), imports after `git pull`, and optionally commits/pushes.
+**Dolt sync**: Dolt handles sync natively via `bd dolt push` / `bd dolt pull`. No JSONL export/import needed.
 
-**Protected branches**: Use `bd init --branch beads-metadata` to commit to separate branch. See [docs/PROTECTED_BRANCHES.md](docs/PROTECTED_BRANCHES.md).
+**Protected branches**: Dolt stores data under `refs/dolt/data`, separate from standard Git refs. See [docs/PROTECTED_BRANCHES.md](docs/PROTECTED_BRANCHES.md).
 
-**Git worktrees**: Enhanced support with shared database architecture. Use `bd --no-daemon` if daemon warnings appear. See [docs/GIT_INTEGRATION.md](docs/GIT_INTEGRATION.md).
+**Git worktrees**: Work directly with Dolt — no special flags needed. See [docs/ADVANCED.md](docs/ADVANCED.md).
 
-**Merge conflicts**: Rare with hash IDs. If conflicts occur, use `git checkout --theirs/.beads/issues.jsonl` and `bd import`. See [docs/GIT_INTEGRATION.md](docs/GIT_INTEGRATION.md).
+**Merge conflicts**: Rare with hash IDs. Dolt uses cell-level 3-way merge for conflict resolution.
+
+## Git Workflow: PR by Default
+
+Crew workers use a PR-based workflow. Beads is a dependency of Gas City, so we
+defer to the standard PR flow to keep changes reviewable.
+
+- Work on a feature branch, push the branch, open a PR against `main`
+- `gh pr create` is the normal path to land work
+- Direct push to main is reserved for releases (tag + release commit) and
+  narrow operational fixes; prefer a PR when unsure
+- When handling external contributor PRs, use fix-merge: checkout the PR
+  branch locally, fix/rebase onto main, merge via PR, then close the PR
+
+### External Contributor PRs: Check Before You Build
+
+**Read [CONTRIBUTING.md](CONTRIBUTING.md)** — it contains promises we've made to contributors. Violating them damages trust and community.
+
+**Before implementing any feature or fix, check for existing open PRs on the same topic:**
+
+```bash
+gh pr list --repo gastownhall/beads --state open --search "<topic keywords>" --json number,title,author,headRefName
+```
+
+**Contributor work gets priority.** If an external PR already exists:
+1. **Review it first** — read the diff, understand the approach
+2. **Build on their work, don't rewrite it** — checkout their branch, fix/adapt as needed
+3. **Preserve their tests** — contributor tests are signal; keep them unless they're wrong
+4. **Attribute properly** — use `Co-authored-by:` in commits, reference their PR number
+5. **Never auto-close a contributor PR** by merging a rewrite — that discards their contribution silently
+
+If you must rewrite (e.g., fundamentally different approach needed), explain why on the original PR and credit the contributor's design/tests in your commits.
+
+This is enforced by pre-use hooks. If you try `gh pr create`, it will be blocked.
 
 ## Landing the Plane
 
@@ -99,20 +141,15 @@ The 30-second debounce provides a **transaction window** for batch operations - 
 **MANDATORY WORKFLOW - COMPLETE ALL STEPS:**
 
 1. **File beads issues for any remaining work** that needs follow-up
-2. **Ensure all quality gates pass** (only if code changes were made) - run tests, linters, builds (file P0 issues if broken)
+2. **Ensure all quality gates pass** (only if code changes were made):
+   - Run `make lint` or `golangci-lint run ./...` (if pre-commit installed: `pre-commit run --all-files`)
+   - Run `make test` (and `make test-icu-path` only if you intentionally need the ICU regex path)
+   - File P0 issues if quality gates are broken
 3. **Update beads issues** - close finished work, update status
 4. **PUSH TO REMOTE - NON-NEGOTIABLE** - This step is MANDATORY. Execute ALL commands below:
    ```bash
    # Pull first to catch any remote changes
    git pull --rebase
-
-   # If conflicts in .beads/issues.jsonl, resolve thoughtfully:
-   #   - git checkout --theirs .beads/issues.jsonl (accept remote)
-   #   - bd import -i .beads/issues.jsonl (re-import)
-   #   - Or manual merge, then import
-
-   # Sync the database (exports to JSONL, commits)
-   bd sync
 
    # MANDATORY: Push everything to remote
    # DO NOT STOP BEFORE THIS COMMAND COMPLETES
@@ -156,11 +193,6 @@ bd close bd-42 bd-43 --reason "Completed" --json
 
 # 4. PUSH TO REMOTE - MANDATORY, NO STOPPING BEFORE THIS IS DONE
 git pull --rebase
-# If conflicts in .beads/issues.jsonl, resolve thoughtfully:
-#   - git checkout --theirs .beads/issues.jsonl (accept remote)
-#   - bd import -i .beads/issues.jsonl (re-import)
-#   - Or manual merge, then import
-bd sync        # Export/import/commit
 git push       # MANDATORY - THE PLANE IS STILL IN THE AIR UNTIL THIS SUCCEEDS
 git status     # MUST verify "up to date with origin/main"
 
@@ -188,61 +220,63 @@ bd show bd-44 --json
 
 ## Agent Session Workflow
 
-**IMPORTANT for AI agents:** When you finish making issue changes, always run:
-
+**WARNING: DO NOT use `bd edit`** - it opens an interactive editor ($EDITOR) which AI agents cannot use. Use `bd update` with flags instead:
 ```bash
-bd sync
+bd update <id> --description "new description"
+bd update <id> --title "new title"
+bd update <id> --design "design notes"
+bd update <id> --notes "additional notes"
+bd update <id> --acceptance "acceptance criteria"
 ```
 
-This immediately:
+**Use stdin for descriptions with special characters** (backticks, `!`, nested quotes):
+```bash
+# Pipe via stdin to avoid shell escaping issues
+echo 'Description with `backticks` and "quotes"' | bd create "Title" --stdin
+echo 'Updated description with $variables' | bd update <id> --description=-
 
-1. Exports pending changes to JSONL (no 30s wait)
-2. Commits to git
-3. Pulls from remote
-4. Imports any updates
-5. Pushes to remote
+# Or use --body-file for longer content
+bd create "Title" --body-file=description.md
+```
 
 **Example agent session:**
 
 ```bash
-# Make multiple changes (batched in 30-second window)
+# Make changes (each write auto-commits to Dolt)
 bd create "Fix bug" -p 1
 bd create "Add tests" -p 1
-bd update bd-42 --status in_progress
+bd update bd-42 --claim
 bd close bd-40 --reason "Completed"
 
-# Force immediate sync at end of session
-bd sync
+# Push Dolt data to remote if configured
+bd dolt push
 
-# Now safe to end session - everything is committed and pushed
-```
-
-**Why this matters:**
-
-- Without `bd sync`, changes sit in 30-second debounce window
-- User might think you pushed but JSONL is still dirty
-- `bd sync` forces immediate flush/commit/push
-
-**STRONGLY RECOMMENDED: Install git hooks for automatic sync** (prevents stale JSONL problems):
-
-```bash
-# One-time setup - run this in each beads workspace
-bd hooks install
+# Now safe to end session
 ```
 
 This installs:
 
-- **pre-commit** - Flushes pending changes immediately before commit (bypasses 30s debounce)
-- **post-merge** - Imports updated JSONL after pull/merge (guaranteed sync)
-- **pre-push** - Exports database to JSONL before push (prevents stale JSONL from reaching remote)
-- **post-checkout** - Imports JSONL after branch checkout (ensures consistency)
-
-**Why git hooks matter:**
-Without the pre-push hook, you can have database changes committed locally but stale JSONL pushed to remote, causing multi-workspace divergence. The hooks guarantee DB ↔ JSONL consistency.
+- **pre-commit** — Commits pending Dolt changes
+- **post-merge** — Pulls remote Dolt changes after git merge
 
 **Note:** Hooks are embedded in the bd binary and work for all bd users (not just source repo users).
 
 ## Common Development Tasks
+
+### CLI Design Principles
+
+**Minimize cognitive overload.** Every new command, flag, or option adds cognitive burden for users. Before adding anything:
+
+1. **Recovery/fix operations → `bd doctor --fix`**: Don't create separate commands like `bd recover` or `bd repair`. Doctor already detects problems - let `--fix` handle remediation. This keeps all health-related operations in one discoverable place.
+   For git hook marker migration specifically: use `bd migrate hooks --dry-run` to preview operations, and `bd doctor --fix` for the standard apply path.
+
+2. **Prefer flags on existing commands**: Before creating a new command, ask: "Can this be a flag on an existing command?" Example: `bd list --stale` instead of `bd stale`.
+
+3. **Consolidate related operations**: Related operations should live together. Version control uses `bd vc {log,diff,commit}`, not separate top-level commands.
+
+4. **Count the commands**: Run `bd --help` and count. If we're approaching 30+ commands, we have a discoverability problem. Consider subcommand grouping.
+
+5. **New commands need strong justification**: A new command should represent a fundamentally different operation, not just a convenience wrapper.
 
 ### Adding a New Command
 
@@ -255,10 +289,10 @@ Without the pre-push hook, you can have database changes committed locally but s
 
 ### Adding Storage Features
 
-1. Update schema in `internal/storage/sqlite/schema.go`
+1. Add Dolt SQL schema changes in `internal/storage/dolt/`
 2. Add migration if needed
 3. Update `internal/types/types.go` if new types
-4. Implement in `internal/storage/sqlite/sqlite.go`
+4. Implement in `internal/storage/dolt/` (queries, issues, etc.)
 5. Add tests
 6. Update export/import in `cmd/bd/export.go` and `cmd/bd/import.go`
 
@@ -273,21 +307,31 @@ Without the pre-push hook, you can have database changes committed locally but s
 ## Building and Testing
 
 ```bash
-# Build
-go build -o bd ./cmd/bd
+# Build and install bd to ~/.local/bin (the canonical location)
+make install
 
-# Test (short - for local development)
-go test -short ./...
+# Test (local baseline)
+make test
 
-# Test with coverage (full tests - for CI)
+# Optional ICU regex path smoke (maintainer-only, not normal validation)
+make test-icu-path
+
+# Coverage run
 go test -coverprofile=coverage.out ./...
 go tool cover -html=coverage.out
 
-# Run locally
-./bd init --prefix test
-./bd create "Test issue" -p 1
-./bd ready
+# Verify installed binary
+bd init --prefix test
+bd create "Test issue" -p 1
+bd ready
 ```
+
+> **WARNING**: Do NOT use `go build -o bd ./cmd/bd`, `go install ./cmd/bd`,
+> or raw `go run ./cmd/bd ...`.
+> These bypass the canonical build path, can create stale binaries in the
+> working directory or `~/go/bin/`, and raw `go run` may miss the required
+> `gms_pure_go` build tag. Always use `make install`, `./bd`, or
+> `go run -tags gms_pure_go ./cmd/bd ...` when you explicitly need `go run`.
 
 ## Version Management
 
@@ -326,7 +370,7 @@ git push origin main
 **Files updated automatically:**
 
 - `cmd/bd/version.go` - CLI version
-- `.claude-plugin/plugin.json` - Plugin version
+- `claude-plugin/.claude-plugin/plugin.json` - Plugin version
 - `.claude-plugin/marketplace.json` - Marketplace version
 - `integrations/beads-mcp/pyproject.toml` - MCP server version
 - `README.md` - Documentation version
@@ -351,11 +395,11 @@ This handles the entire release workflow automatically, including waiting ~5 min
 
 1. Bump version: `./scripts/bump-version.sh <version> --commit`
 2. Update CHANGELOG.md with release notes
-3. Run tests: `go test -short ./...` (CI runs full suite)
+3. Run tests: `make test` (and `make test-icu-path` only if you intentionally need the ICU regex path)
 4. Push version bump: `git push origin main`
 5. Tag release: `git tag v<version> && git push origin v<version>`
 6. Update Homebrew: `./scripts/update-homebrew.sh <version>` (waits for GitHub Actions)
-7. Verify: `brew update && brew upgrade bd && bd version`
+7. Verify: `brew update && brew upgrade beads && bd version`
 
 See [docs/RELEASING.md](docs/RELEASING.md) for complete manual instructions.
 
@@ -403,6 +447,6 @@ gh issue view 201
 
 - **README.md** - Main documentation (keep this updated!)
 - **EXTENDING.md** - Database extension guide
-- **ADVANCED.md** - JSONL format analysis
+- **ADVANCED.md** - Advanced features (rename, merge, compaction)
 - **CONTRIBUTING.md** - Contribution guidelines
 - **SECURITY.md** - Security policy

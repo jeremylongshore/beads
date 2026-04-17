@@ -1,117 +1,150 @@
 package doctor
 
 import (
-	"bufio"
-	"database/sql"
-	"encoding/json"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
-	_ "github.com/ncruces/go-sqlite3/driver"
-	_ "github.com/ncruces/go-sqlite3/embed"
 	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
-	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"gopkg.in/yaml.v3"
 )
 
-// localConfig represents the config.yaml structure for no-db mode detection
+// localConfig represents the config.yaml structure for no-db and prefer-dolt detection
 type localConfig struct {
 	SyncBranch string `yaml:"sync-branch"`
 	NoDb       bool   `yaml:"no-db"`
+	PreferDolt bool   `yaml:"prefer-dolt"`
 }
 
-// CheckDatabaseVersion checks the database version and migration status
-func CheckDatabaseVersion(path string, cliVersion string) DoctorCheck {
-	beadsDir := filepath.Join(path, ".beads")
+// CheckDoltFormat detects old dolt databases created by pre-0.56 bd versions
+// (GH#2137). Those databases used embedded Dolt mode and may be incompatible
+// with the current server-only architecture. The ensureDoltInit function
+// auto-recovers these at server start; this check provides early detection.
+func CheckDoltFormat(path string) DoctorCheck {
+	_, beadsDir := getBackendAndBeadsDir(path)
+	doltDir := filepath.Join(beadsDir, "dolt")
 
-	// Check metadata.json first for custom database name
-	var dbPath string
-	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
-		dbPath = cfg.DatabasePath(beadsDir)
-	} else {
-		// Fall back to canonical database name
-		dbPath = filepath.Join(beadsDir, beads.CanonicalDatabaseName)
+	if _, err := os.Stat(filepath.Join(doltDir, ".dolt")); os.IsNotExist(err) {
+		return DoctorCheck{
+			Name:     "Dolt Format",
+			Status:   StatusOK,
+			Message:  "N/A (no dolt database)",
+			Category: CategoryCore,
+		}
 	}
 
-	// Check if database file exists
-	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		// Check if JSONL exists
-		// Check canonical (issues.jsonl) first, then legacy (beads.jsonl)
-		issuesJSONL := filepath.Join(beadsDir, "issues.jsonl")
-		beadsJSONL := filepath.Join(beadsDir, "beads.jsonl")
-
-		var jsonlPath string
-		if _, err := os.Stat(issuesJSONL); err == nil {
-			jsonlPath = issuesJSONL
-		} else if _, err := os.Stat(beadsJSONL); err == nil {
-			jsonlPath = beadsJSONL
+	if doltserver.IsPreV56DoltDir(doltDir) {
+		return DoctorCheck{
+			Name:     "Dolt Format",
+			Status:   StatusWarning,
+			Message:  "Dolt database from pre-0.56 bd version (missing .bd-dolt-ok marker)",
+			Detail:   fmt.Sprintf("Path: %s", doltDir),
+			Fix:      "Delete .beads/dolt/.dolt/ and re-run, or restart the Dolt server (auto-recovery will rebuild it)",
+			Category: CategoryCore,
 		}
+	}
 
-		if jsonlPath != "" {
-			// JSONL exists but no database - check if this is no-db mode or fresh clone
-			// Use proper YAML parsing to detect no-db mode (bd-r6k2)
-			if isNoDbModeConfigured(beadsDir) {
-				return DoctorCheck{
-					Name:    "Database",
-					Status:  StatusOK,
-					Message: "JSONL-only mode",
-					Detail:  "Using issues.jsonl (no SQLite database)",
-				}
-			}
+	return DoctorCheck{
+		Name:     "Dolt Format",
+		Status:   StatusOK,
+		Message:  "Compatible dolt database",
+		Category: CategoryCore,
+	}
+}
 
-			// This is a fresh clone - JSONL exists but no database and not no-db mode
-			// Count issues and detect prefix for helpful suggestion
-			issueCount := countIssuesInJSONLFile(jsonlPath)
-			prefix := detectPrefixFromJSONL(jsonlPath)
+// CheckDatabaseVersion checks the database version and migration status.
+// Opens its own store; prefer CheckDatabaseVersionWithStore when a shared store is available.
+func CheckDatabaseVersion(path string, cliVersion string) DoctorCheck {
+	_, beadsDir := getBackendAndBeadsDir(path)
 
-			message := "Fresh clone detected (no database)"
-			detail := fmt.Sprintf("Found %d issue(s) in JSONL that need to be imported", issueCount)
-			fix := "Run 'bd init' to hydrate the database from JSONL"
-			if prefix != "" {
-				fix = fmt.Sprintf("Run 'bd init' to hydrate the database (detected prefix: %s)", prefix)
-			}
-
-			return DoctorCheck{
-				Name:    "Database",
-				Status:  StatusWarning,
-				Message: message,
-				Detail:  detail,
-				Fix:     fix,
-			}
-		}
-
+	doltPath := getDatabasePath(beadsDir)
+	if _, err := os.Stat(doltPath); os.IsNotExist(err) {
 		return DoctorCheck{
 			Name:    "Database",
 			Status:  StatusError,
-			Message: "No beads.db found",
-			Fix:     "Run 'bd init' to create database",
+			Message: "No dolt database found",
+			Detail:  "Storage: Dolt",
+			Fix:     "Run 'bd bootstrap' as the safe existing-project recovery entry point. Use '--dry-run' to inspect the plan first, and use 'bd init' only for brand-new projects.",
 		}
 	}
 
-	// Get database version
-	dbVersion := getDatabaseVersionFromPath(dbPath)
+	ctx := context.Background()
+	store, err := dolt.NewFromConfigWithCLIOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
+	if err != nil {
+		return DoctorCheck{
+			Name:    "Database",
+			Status:  StatusError,
+			Message: "Unable to open database",
+			Detail:  fmt.Sprintf("Storage: Dolt\n\nError: %v", err),
+			Fix:     "Run 'bd doctor --fix' to attempt repair. Check 'bd dolt status' for server configuration issues",
+		}
+	}
+	defer func() { _ = store.Close() }()
 
-	if dbVersion == "unknown" {
+	return checkDatabaseVersionWithStore(store, cliVersion)
+}
+
+// CheckDatabaseVersionWithStore checks the database version using a shared store (GH#2636).
+func CheckDatabaseVersionWithStore(ss *SharedStore, cliVersion string) DoctorCheck {
+	beadsDir := sharedStoreBeadsDir(ss)
+	store := ss.Store()
+	if store == nil {
+		if !sharedStoreNeedsLocalDoltDir(beadsDir) {
+			return DoctorCheck{
+				Name:    "Database",
+				Status:  StatusError,
+				Message: "Unable to open database",
+				Detail:  "Storage: Dolt",
+				Fix:     "Check 'bd dolt status' for server availability and configured database name, then re-run 'bd doctor'",
+			}
+		}
+
+		doltPath := getDatabasePath(beadsDir)
+		if _, err := os.Stat(doltPath); os.IsNotExist(err) {
+			return DoctorCheck{
+				Name:    "Database",
+				Status:  StatusError,
+				Message: "No dolt database found",
+				Detail:  "Storage: Dolt",
+				Fix:     "Run 'bd bootstrap' as the safe existing-project recovery entry point. Use '--dry-run' to inspect the plan first, and use 'bd init' only for brand-new projects.",
+			}
+		}
+		return DoctorCheck{
+			Name:    "Database",
+			Status:  StatusError,
+			Message: "Unable to open database",
+			Detail:  "Storage: Dolt",
+			Fix:     "Run 'bd doctor --fix' to attempt repair. Check 'bd dolt status' for server configuration issues",
+		}
+	}
+	return checkDatabaseVersionWithStore(store, cliVersion)
+}
+
+func checkDatabaseVersionWithStore(store *dolt.DoltStore, cliVersion string) DoctorCheck {
+	ctx := context.Background()
+	dbVersion, err := store.GetLocalMetadata(ctx, "bd_version")
+	if err != nil {
 		return DoctorCheck{
 			Name:    "Database",
 			Status:  StatusError,
 			Message: "Unable to read database version",
-			Detail:  "Storage: SQLite",
-			Fix:     "Database may be corrupted. Try 'bd migrate'",
+			Detail:  fmt.Sprintf("Storage: Dolt\n\nError: %v", err),
+			Fix:     "Database may be corrupted. Run 'bd doctor --fix' to recover",
 		}
 	}
-
-	if dbVersion == "pre-0.17.5" {
+	if dbVersion == "" {
+		// bd_version is in local_metadata (dolt-ignored), so it's expected to be
+		// empty after a working-set reset. It self-heals on next startup.
 		return DoctorCheck{
 			Name:    "Database",
-			Status:  StatusWarning,
-			Message: fmt.Sprintf("version %s (very old)", dbVersion),
-			Detail:  "Storage: SQLite",
-			Fix:     "Run 'bd migrate' to upgrade database schema",
+			Status:  StatusOK,
+			Message: "bd_version not yet stamped (will self-heal on next startup)",
+			Detail:  "Storage: Dolt",
 		}
 	}
 
@@ -120,8 +153,8 @@ func CheckDatabaseVersion(path string, cliVersion string) DoctorCheck {
 			Name:    "Database",
 			Status:  StatusWarning,
 			Message: fmt.Sprintf("version %s (CLI: %s)", dbVersion, cliVersion),
-			Detail:  "Storage: SQLite",
-			Fix:     "Run 'bd migrate' to sync database with CLI version",
+			Detail:  "Storage: Dolt",
+			Fix:     "Update bd CLI and re-run (dolt metadata will be updated automatically)",
 		}
 	}
 
@@ -129,25 +162,16 @@ func CheckDatabaseVersion(path string, cliVersion string) DoctorCheck {
 		Name:    "Database",
 		Status:  StatusOK,
 		Message: fmt.Sprintf("version %s", dbVersion),
-		Detail:  "Storage: SQLite",
+		Detail:  "Storage: Dolt",
 	}
 }
 
-// CheckSchemaCompatibility checks if all required tables and columns are present
+// CheckSchemaCompatibility checks if all required tables and columns are present.
+// Opens its own store; prefer CheckSchemaCompatibilityWithStore when a shared store is available.
 func CheckSchemaCompatibility(path string) DoctorCheck {
-	beadsDir := filepath.Join(path, ".beads")
+	_, beadsDir := getBackendAndBeadsDir(path)
 
-	// Check metadata.json first for custom database name
-	var dbPath string
-	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
-		dbPath = cfg.DatabasePath(beadsDir)
-	} else {
-		// Fall back to canonical database name
-		dbPath = filepath.Join(beadsDir, beads.CanonicalDatabaseName)
-	}
-
-	// If no database, skip this check
-	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+	if info, err := os.Stat(getDatabasePath(beadsDir)); err != nil || !info.IsDir() {
 		return DoctorCheck{
 			Name:    "Schema Compatibility",
 			Status:  StatusOK,
@@ -155,87 +179,61 @@ func CheckSchemaCompatibility(path string) DoctorCheck {
 		}
 	}
 
-	// Open database (bd-ckvw: This will run migrations and schema probe)
-	// Note: We can't use the global 'store' because doctor can check arbitrary paths
-	db, err := sql.Open("sqlite3", "file:"+dbPath+"?_pragma=foreign_keys(ON)&_pragma=busy_timeout(30000)")
+	ctx := context.Background()
+	store, err := dolt.NewFromConfigWithCLIOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Schema Compatibility",
 			Status:  StatusError,
 			Message: "Failed to open database",
-			Detail:  err.Error(),
-			Fix:     "Database may be corrupted. Try 'bd migrate' or restore from backup",
+			Detail:  fmt.Sprintf("Storage: Dolt\n\nError: %v", err),
 		}
 	}
-	defer db.Close()
+	defer func() { _ = store.Close() }()
 
-	// Run schema probe (defined in internal/storage/sqlite/schema_probe.go)
-	// This is a simplified version since we can't import the internal package directly
-	// Check all critical tables and columns
-	criticalChecks := map[string][]string{
-		"issues":         {"id", "title", "content_hash", "external_ref", "compacted_at", "close_reason", "pinned", "sender", "ephemeral"},
-		"dependencies":   {"issue_id", "depends_on_id", "type", "metadata", "thread_id"},
-		"child_counters": {"parent_id", "last_child"},
-		"export_hashes":  {"issue_id", "content_hash"},
-	}
+	return checkSchemaCompatibilityWithStore(store)
+}
 
-	var missingElements []string
-	for table, columns := range criticalChecks {
-		// Try to query all columns
-		query := fmt.Sprintf(
-			"SELECT %s FROM %s LIMIT 0",
-			strings.Join(columns, ", "),
-			table,
-		) // #nosec G201 -- table/column names sourced from hardcoded map
-		_, err := db.Exec(query)
-
-		if err != nil {
-			errMsg := err.Error()
-			if strings.Contains(errMsg, "no such table") {
-				missingElements = append(missingElements, fmt.Sprintf("table:%s", table))
-			} else if strings.Contains(errMsg, "no such column") {
-				// Find which columns are missing
-				for _, col := range columns {
-					colQuery := fmt.Sprintf("SELECT %s FROM %s LIMIT 0", col, table) // #nosec G201 -- names come from static schema definition
-					if _, colErr := db.Exec(colQuery); colErr != nil && strings.Contains(colErr.Error(), "no such column") {
-						missingElements = append(missingElements, fmt.Sprintf("%s.%s", table, col))
-					}
-				}
-			}
+// CheckSchemaCompatibilityWithStore checks schema compatibility using a shared store (GH#2636).
+func CheckSchemaCompatibilityWithStore(ss *SharedStore) DoctorCheck {
+	store := ss.Store()
+	if store == nil {
+		return DoctorCheck{
+			Name:    "Schema Compatibility",
+			Status:  StatusOK,
+			Message: "N/A (no database)",
 		}
 	}
+	return checkSchemaCompatibilityWithStore(store)
+}
 
-	if len(missingElements) > 0 {
+func checkSchemaCompatibilityWithStore(store *dolt.DoltStore) DoctorCheck {
+	ctx := context.Background()
+	// Exercise core tables/views.
+	if _, err := store.GetStatistics(ctx); err != nil {
 		return DoctorCheck{
 			Name:    "Schema Compatibility",
 			Status:  StatusError,
 			Message: "Database schema is incomplete or incompatible",
-			Detail:  fmt.Sprintf("Missing: %s", strings.Join(missingElements, ", ")),
-			Fix:     "Run 'bd migrate' to upgrade schema, or if daemon is running an old version, run 'bd daemons killall' to restart",
+			Detail:  fmt.Sprintf("Storage: Dolt\n\nError: %v", err),
+			Fix:     "Run 'bd doctor --fix' to attempt repair. If schema is incompatible, export data first with 'bd export'",
 		}
 	}
 
 	return DoctorCheck{
 		Name:    "Schema Compatibility",
 		Status:  StatusOK,
-		Message: "All required tables and columns present",
+		Message: "Basic queries succeeded",
+		Detail:  "Storage: Dolt",
 	}
 }
 
-// CheckDatabaseIntegrity runs SQLite's PRAGMA integrity_check (bd-2au)
+// CheckDatabaseIntegrity runs a basic integrity check on the database.
+// Opens its own store; prefer CheckDatabaseIntegrityWithStore when a shared store is available.
 func CheckDatabaseIntegrity(path string) DoctorCheck {
-	beadsDir := filepath.Join(path, ".beads")
+	_, beadsDir := getBackendAndBeadsDir(path)
 
-	// Get database path (same logic as CheckSchemaCompatibility)
-	var dbPath string
-	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
-		dbPath = cfg.DatabasePath(beadsDir)
-	} else {
-		dbPath = filepath.Join(beadsDir, beads.CanonicalDatabaseName)
-	}
-
-	// If no database, skip this check
-	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+	if info, err := os.Stat(getDatabasePath(beadsDir)); err != nil || !info.IsDir() {
 		return DoctorCheck{
 			Name:    "Database Integrity",
 			Status:  StatusOK,
@@ -243,365 +241,242 @@ func CheckDatabaseIntegrity(path string) DoctorCheck {
 		}
 	}
 
-	// Open database in read-only mode for integrity check
-	db, err := sql.Open("sqlite3", "file:"+dbPath+"?mode=ro&_pragma=busy_timeout(30000)")
+	ctx := context.Background()
+	store, err := dolt.NewFromConfigWithCLIOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	if err != nil {
+		if manualDetail := serverModeIntegrityManualRecoveryDetail(beadsDir); manualDetail != "" {
+			return DoctorCheck{
+				Name:    "Database Integrity",
+				Status:  StatusError,
+				Message: "Failed to open configured server-mode database",
+				Detail:  fmt.Sprintf("Storage: Dolt\n\nError: %v\n\n%s", err, manualDetail),
+			}
+		}
 		return DoctorCheck{
 			Name:    "Database Integrity",
 			Status:  StatusError,
-			Message: "Failed to open database for integrity check",
-			Detail:  err.Error(),
+			Message: "Failed to open database",
+			Detail:  fmt.Sprintf("Storage: Dolt\n\nError: %v", err),
+			Fix:     "Run 'bd doctor --fix' to attempt repair. Check 'bd dolt status' for server issues",
 		}
 	}
-	defer db.Close()
+	defer func() { _ = store.Close() }()
 
-	// Run PRAGMA integrity_check
-	// This checks the entire database for corruption
-	rows, err := db.Query("PRAGMA integrity_check")
-	if err != nil {
-		return DoctorCheck{
-			Name:    "Database Integrity",
-			Status:  StatusError,
-			Message: "Failed to run integrity check",
-			Detail:  err.Error(),
-		}
-	}
-	defer rows.Close()
+	return checkDatabaseIntegrityWithStore(store)
+}
 
-	var results []string
-	for rows.Next() {
-		var result string
-		if err := rows.Scan(&result); err != nil {
-			continue
-		}
-		results = append(results, result)
-	}
-
-	// "ok" means no corruption detected
-	if len(results) == 1 && results[0] == "ok" {
+// CheckDatabaseIntegrityWithStore checks database integrity using a shared store (GH#2636).
+func CheckDatabaseIntegrityWithStore(ss *SharedStore) DoctorCheck {
+	store := ss.Store()
+	if store == nil {
 		return DoctorCheck{
 			Name:    "Database Integrity",
 			Status:  StatusOK,
-			Message: "No corruption detected",
+			Message: "N/A (no database)",
+		}
+	}
+	return checkDatabaseIntegrityWithStore(store)
+}
+
+func checkDatabaseIntegrityWithStore(store *dolt.DoltStore) DoctorCheck {
+	ctx := context.Background()
+	// Minimal checks: metadata + statistics. If these work, the store is at least readable.
+	if _, err := store.GetLocalMetadata(ctx, "bd_version"); err != nil {
+		return DoctorCheck{
+			Name:    "Database Integrity",
+			Status:  StatusError,
+			Message: "Basic query failed",
+			Detail:  fmt.Sprintf("Storage: Dolt\n\nError: %v", err),
+		}
+	}
+	if _, err := store.GetStatistics(ctx); err != nil {
+		return DoctorCheck{
+			Name:    "Database Integrity",
+			Status:  StatusError,
+			Message: "Basic query failed",
+			Detail:  fmt.Sprintf("Storage: Dolt\n\nError: %v", err),
 		}
 	}
 
-	// Any other result indicates corruption
 	return DoctorCheck{
 		Name:    "Database Integrity",
-		Status:  StatusError,
-		Message: "Database corruption detected",
-		Detail:  strings.Join(results, "; "),
-		Fix:     "Database may need recovery. Export with 'bd export' if possible, then restore from backup or reinitialize",
+		Status:  StatusOK,
+		Message: "Basic query check passed",
+		Detail:  "Storage: Dolt",
 	}
 }
 
-// CheckDatabaseJSONLSync checks if database and JSONL are in sync
-func CheckDatabaseJSONLSync(path string) DoctorCheck {
-	beadsDir := filepath.Join(path, ".beads")
-	dbPath := filepath.Join(beadsDir, beads.CanonicalDatabaseName)
-
-	// Find JSONL file
-	var jsonlPath string
-	for _, name := range []string{"issues.jsonl", "beads.jsonl"} {
-		testPath := filepath.Join(beadsDir, name)
-		if _, err := os.Stat(testPath); err == nil {
-			jsonlPath = testPath
-			break
-		}
+func serverModeIntegrityManualRecoveryDetail(beadsDir string) string {
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil || !cfg.IsDoltServerMode() {
+		return ""
 	}
 
-	// If no database, skip this check
-	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+	dbName := cfg.GetDoltDatabase()
+	if dbName == "" {
+		dbName = configfile.DefaultDoltDatabase
+	}
+
+	return fmt.Sprintf(
+		"Automatic integrity recovery is disabled for server-mode repos because it can replace the wrong Dolt root.\nPreserve the Dolt root at %s and verify the configured database %q manually before any reinitialization.",
+		getDatabasePath(beadsDir),
+		dbName,
+	)
+}
+
+// CheckProjectIdentity detects missing project_id in metadata.json and/or
+// _project_id in the database. Projects initialized before GH#2372 lack these
+// fields and are unprotected against cross-project data leakage.
+// Opens its own store; prefer CheckProjectIdentityWithStore when a shared store is available.
+func CheckProjectIdentity(path string) DoctorCheck {
+	_, beadsDir := getBackendAndBeadsDir(path)
+
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil {
 		return DoctorCheck{
-			Name:    "DB-JSONL Sync",
-			Status:  StatusOK,
-			Message: "N/A (no database)",
+			Name:     "Project Identity",
+			Status:   StatusOK,
+			Message:  "N/A (no metadata.json)",
+			Category: CategoryData,
 		}
 	}
 
-	// If no JSONL, skip this check
-	if jsonlPath == "" {
+	doltPath := getDatabasePath(beadsDir)
+	if _, err := os.Stat(doltPath); os.IsNotExist(err) {
 		return DoctorCheck{
-			Name:    "DB-JSONL Sync",
-			Status:  StatusOK,
-			Message: "N/A (no JSONL file)",
+			Name:     "Project Identity",
+			Status:   StatusOK,
+			Message:  "N/A (no database)",
+			Category: CategoryData,
 		}
 	}
 
-	// Try to read JSONL first (doesn't depend on database)
-	jsonlCount, jsonlPrefixes, jsonlErr := CountJSONLIssues(jsonlPath)
+	hasLocalID := cfg.ProjectID != ""
 
-	// Single database open for all queries (instead of 3 separate opens)
-	db, err := sql.Open("sqlite3", dbPath)
+	// Check database for _project_id
+	ctx := context.Background()
+	store, err := dolt.NewFromConfigWithCLIOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	if err != nil {
-		// Database can't be opened. If JSONL has issues, suggest recovery.
-		if jsonlErr == nil && jsonlCount > 0 {
+		// Can't open DB — report based on metadata.json alone
+		return checkProjectIdentityNoStore(cfg, hasLocalID)
+	}
+	defer func() { _ = store.Close() }()
+
+	return checkProjectIdentityWithStore(store, cfg)
+}
+
+// CheckProjectIdentityWithStore checks project identity using a shared store (GH#2636).
+func CheckProjectIdentityWithStore(ss *SharedStore, path string) DoctorCheck {
+	_, beadsDir := getBackendAndBeadsDir(path)
+
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil {
+		return DoctorCheck{
+			Name:     "Project Identity",
+			Status:   StatusOK,
+			Message:  "N/A (no metadata.json)",
+			Category: CategoryData,
+		}
+	}
+
+	hasLocalID := cfg.ProjectID != ""
+
+	store := ss.Store()
+	if store == nil {
+		doltPath := getDatabasePath(beadsDir)
+		if _, err := os.Stat(doltPath); os.IsNotExist(err) {
 			return DoctorCheck{
-				Name:    "DB-JSONL Sync",
-				Status:  StatusWarning,
-				Message: fmt.Sprintf("Database cannot be opened but JSONL contains %d issues", jsonlCount),
-				Detail:  err.Error(),
-				Fix:     fmt.Sprintf("Run 'bd import -i %s --rename-on-import' to recover issues from JSONL", filepath.Base(jsonlPath)),
+				Name:     "Project Identity",
+				Status:   StatusOK,
+				Message:  "N/A (no database)",
+				Category: CategoryData,
 			}
 		}
+		return checkProjectIdentityNoStore(cfg, hasLocalID)
+	}
+
+	return checkProjectIdentityWithStore(store, cfg)
+}
+
+func checkProjectIdentityNoStore(_ *configfile.Config, hasLocalID bool) DoctorCheck {
+	if !hasLocalID {
 		return DoctorCheck{
-			Name:    "DB-JSONL Sync",
-			Status:  StatusWarning,
-			Message: "Unable to open database",
-			Detail:  err.Error(),
+			Name:     "Project Identity",
+			Status:   StatusWarning,
+			Message:  "Missing project_id in metadata.json (unable to check database)",
+			Fix:      "Run 'bd doctor --fix' to generate and backfill project identity",
+			Category: CategoryData,
 		}
 	}
-	defer db.Close()
+	return DoctorCheck{
+		Name:     "Project Identity",
+		Status:   StatusOK,
+		Message:  "metadata.json has project_id (unable to verify database)",
+		Category: CategoryData,
+	}
+}
 
-	// Get database count
-	var dbCount int
-	err = db.QueryRow("SELECT COUNT(*) FROM issues").Scan(&dbCount)
-	if err != nil {
-		// Database opened but can't query. If JSONL has issues, suggest recovery.
-		if jsonlErr == nil && jsonlCount > 0 {
+func checkProjectIdentityWithStore(store *dolt.DoltStore, cfg *configfile.Config) DoctorCheck {
+	hasLocalID := cfg.ProjectID != ""
+	ctx := context.Background()
+
+	dbID, err := store.GetMetadata(ctx, "_project_id")
+	hasDBID := err == nil && dbID != ""
+
+	if hasLocalID && hasDBID {
+		if cfg.ProjectID != dbID {
 			return DoctorCheck{
-				Name:    "DB-JSONL Sync",
-				Status:  StatusWarning,
-				Message: fmt.Sprintf("Database cannot be queried but JSONL contains %d issues", jsonlCount),
-				Detail:  err.Error(),
-				Fix:     fmt.Sprintf("Run 'bd import -i %s --rename-on-import' to recover issues from JSONL", filepath.Base(jsonlPath)),
+				Name:     "Project Identity",
+				Status:   StatusError,
+				Message:  fmt.Sprintf("Project ID mismatch: metadata.json=%s, database=%s", cfg.ProjectID, dbID),
+				Detail:   "This may indicate cross-project data leakage (GH#2372)",
+				Fix:      "Run 'bd dolt status' to diagnose. Do NOT run 'bd init'",
+				Category: CategoryData,
 			}
 		}
 		return DoctorCheck{
-			Name:    "DB-JSONL Sync",
-			Status:  StatusWarning,
-			Message: "Unable to query database",
-			Detail:  err.Error(),
+			Name:     "Project Identity",
+			Status:   StatusOK,
+			Message:  fmt.Sprintf("project_id: %s", cfg.ProjectID),
+			Category: CategoryData,
 		}
 	}
 
-	// Get database prefix
-	var dbPrefix string
-	err = db.QueryRow("SELECT value FROM config WHERE key = ?", "issue_prefix").Scan(&dbPrefix)
-	if err != nil && err != sql.ErrNoRows {
-		return DoctorCheck{
-			Name:    "DB-JSONL Sync",
-			Status:  StatusWarning,
-			Message: "Unable to read database prefix",
-			Detail:  err.Error(),
-		}
+	// At least one is missing
+	var missing []string
+	if !hasLocalID {
+		missing = append(missing, "metadata.json")
 	}
-
-	// Use JSONL error if we got it earlier
-	if jsonlErr != nil {
-		return DoctorCheck{
-			Name:    "DB-JSONL Sync",
-			Status:  StatusWarning,
-			Message: "Unable to read JSONL file",
-			Detail:  jsonlErr.Error(),
-		}
-	}
-
-	// Check for issues
-	var issues []string
-
-	// Count mismatch
-	if dbCount != jsonlCount {
-		issues = append(issues, fmt.Sprintf("Count mismatch: database has %d issues, JSONL has %d", dbCount, jsonlCount))
-	}
-
-	// Prefix mismatch (only check most common prefix in JSONL)
-	if dbPrefix != "" && len(jsonlPrefixes) > 0 {
-		var mostCommonPrefix string
-		maxCount := 0
-		for prefix, count := range jsonlPrefixes {
-			if count > maxCount {
-				maxCount = count
-				mostCommonPrefix = prefix
-			}
-		}
-
-		// Only warn if majority of issues have wrong prefix
-		if mostCommonPrefix != dbPrefix && maxCount > jsonlCount/2 {
-			issues = append(issues, fmt.Sprintf("Prefix mismatch: database uses %q but most JSONL issues use %q", dbPrefix, mostCommonPrefix))
-		}
-	}
-
-	// If we found issues, report them
-	if len(issues) > 0 {
-		// Provide direction-specific guidance
-		var fixMsg string
-		if dbCount > jsonlCount {
-			fixMsg = "Run 'bd doctor --fix' to automatically export DB to JSONL, or manually run 'bd export'"
-		} else if jsonlCount > dbCount {
-			fixMsg = "Run 'bd doctor --fix' to automatically import JSONL to DB, or manually run 'bd sync --import-only'"
-		} else {
-			// Equal counts but other issues (like prefix mismatch)
-			fixMsg = "Run 'bd doctor --fix' to fix automatically, or manually run 'bd sync --import-only' or 'bd export' depending on which has newer data"
-		}
-		if strings.Contains(strings.Join(issues, " "), "Prefix mismatch") {
-			fixMsg = "Run 'bd import -i " + filepath.Base(jsonlPath) + " --rename-on-import' to fix prefixes"
-		}
-
-		return DoctorCheck{
-			Name:    "DB-JSONL Sync",
-			Status:  StatusWarning,
-			Message: strings.Join(issues, "; "),
-			Fix:     fixMsg,
-		}
-	}
-
-	// Check modification times (only if counts match)
-	dbInfo, err := os.Stat(dbPath)
-	if err != nil {
-		return DoctorCheck{
-			Name:    "DB-JSONL Sync",
-			Status:  StatusWarning,
-			Message: "Unable to check database file",
-		}
-	}
-
-	jsonlInfo, err := os.Stat(jsonlPath)
-	if err != nil {
-		return DoctorCheck{
-			Name:    "DB-JSONL Sync",
-			Status:  StatusWarning,
-			Message: "Unable to check JSONL file",
-		}
-	}
-
-	if jsonlInfo.ModTime().After(dbInfo.ModTime()) {
-		timeDiff := jsonlInfo.ModTime().Sub(dbInfo.ModTime())
-		if timeDiff > 30*time.Second {
-			return DoctorCheck{
-				Name:    "DB-JSONL Sync",
-				Status:  StatusWarning,
-				Message: "JSONL is newer than database",
-				Fix:     "Run 'bd sync --import-only' to import JSONL updates",
-			}
-		}
+	if !hasDBID {
+		missing = append(missing, "database")
 	}
 
 	return DoctorCheck{
-		Name:    "DB-JSONL Sync",
-		Status:  StatusOK,
-		Message: "Database and JSONL are in sync",
+		Name:     "Project Identity",
+		Status:   StatusWarning,
+		Message:  fmt.Sprintf("Missing project_id in: %s (pre-GH#2372 project)", strings.Join(missing, ", ")),
+		Detail:   "Without project identity, cross-project data leakage cannot be detected",
+		Fix:      "Run 'bd doctor --fix' to generate and backfill project identity",
+		Category: CategoryData,
 	}
 }
 
 // Fix functions
 
-// FixDatabaseConfig auto-detects and fixes metadata.json database/JSONL config mismatches
+// FixDatabaseConfig auto-detects and fixes metadata.json database config mismatches
 func FixDatabaseConfig(path string) error {
 	return fix.DatabaseConfig(path)
 }
 
-// FixDBJSONLSync fixes database-JSONL sync issues by running bd sync --import-only
-func FixDBJSONLSync(path string) error {
-	return fix.DBJSONLSync(path)
-}
-
-// Helper functions
-
-// getDatabaseVersionFromPath reads the database version from the given path
-func getDatabaseVersionFromPath(dbPath string) string {
-	db, err := sql.Open("sqlite3", "file:"+dbPath+"?mode=ro")
-	if err != nil {
-		return "unknown"
+// getDatabasePath returns the actual database directory path, respecting dolt_data_dir.
+// When dolt_data_dir is configured (e.g. ext4 redirect for WSL), the database lives
+// outside .beads/dolt/ — this function resolves the correct location.
+func getDatabasePath(beadsDir string) string {
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil {
+		return filepath.Join(beadsDir, "dolt") // fallback to default
 	}
-	defer db.Close()
-
-	// Try to read version from metadata table
-	var version string
-	err = db.QueryRow("SELECT value FROM metadata WHERE key = 'bd_version'").Scan(&version)
-	if err == nil {
-		return version
-	}
-
-	// Check if metadata table exists
-	var tableName string
-	err = db.QueryRow(`
-		SELECT name FROM sqlite_master
-		WHERE type='table' AND name='metadata'
-	`).Scan(&tableName)
-
-	if err == sql.ErrNoRows {
-		return "pre-0.17.5"
-	}
-
-	return "unknown"
-}
-
-// CountJSONLIssues counts issues in the JSONL file and returns the count, prefixes, and any error
-func CountJSONLIssues(jsonlPath string) (int, map[string]int, error) {
-	// jsonlPath is safe: constructed from filepath.Join(beadsDir, hardcoded name)
-	file, err := os.Open(jsonlPath) //nolint:gosec
-	if err != nil {
-		return 0, nil, fmt.Errorf("failed to open JSONL file: %w", err)
-	}
-	defer file.Close()
-
-	count := 0
-	prefixes := make(map[string]int)
-	errorCount := 0
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-
-		// Parse JSON to get the ID
-		var issue map[string]interface{}
-		if err := json.Unmarshal(line, &issue); err != nil {
-			errorCount++
-			continue
-		}
-
-		if id, ok := issue["id"].(string); ok && id != "" {
-			count++
-			// Extract prefix (everything before the last dash)
-			lastDash := strings.LastIndex(id, "-")
-			if lastDash != -1 {
-				prefixes[id[:lastDash]]++
-			} else {
-				prefixes[id]++
-			}
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return count, prefixes, fmt.Errorf("failed to read JSONL file: %w", err)
-	}
-
-	if errorCount > 0 {
-		return count, prefixes, fmt.Errorf("skipped %d malformed lines in JSONL", errorCount)
-	}
-
-	return count, prefixes, nil
-}
-
-// countIssuesInJSONLFile counts the number of valid issues in a JSONL file
-// This is a wrapper around CountJSONLIssues that returns only the count
-func countIssuesInJSONLFile(jsonlPath string) int {
-	count, _, _ := CountJSONLIssues(jsonlPath)
-	return count
-}
-
-// detectPrefixFromJSONL detects the most common prefix in a JSONL file
-func detectPrefixFromJSONL(jsonlPath string) string {
-	_, prefixes, _ := CountJSONLIssues(jsonlPath)
-	if len(prefixes) == 0 {
-		return ""
-	}
-
-	// Find the most common prefix
-	var mostCommonPrefix string
-	maxCount := 0
-	for prefix, count := range prefixes {
-		if count > maxCount {
-			maxCount = count
-			mostCommonPrefix = prefix
-		}
-	}
-	return mostCommonPrefix
+	return cfg.DatabasePath(beadsDir)
 }
 
 // isNoDbModeConfigured checks if no-db: true is set in config.yaml
@@ -619,4 +494,101 @@ func isNoDbModeConfigured(beadsDir string) bool {
 	}
 
 	return cfg.NoDb
+}
+
+// CheckDatabaseSize warns when the database has accumulated many closed issues.
+// This is purely informational - pruning is NEVER auto-fixed because it
+// permanently deletes data. Users must explicitly run 'bd cleanup' to prune.
+//
+// Config: doctor.suggest_pruning_issue_count (default: 5000, 0 = disabled)
+//
+// DESIGN NOTE: This check intentionally has NO auto-fix. Unlike other doctor
+// checks that fix configuration or sync issues, pruning is destructive and
+// irreversible. The user must make an explicit decision to delete their
+// closed issue history. We only provide guidance, never action.
+// CheckDatabaseSize warns when the database has accumulated many closed issues.
+// Opens its own store; prefer CheckDatabaseSizeWithStore when a shared store is available.
+func CheckDatabaseSize(path string) DoctorCheck {
+	_, beadsDir := getBackendAndBeadsDir(path)
+
+	doltPath := getDatabasePath(beadsDir)
+	if _, err := os.Stat(doltPath); os.IsNotExist(err) {
+		return DoctorCheck{
+			Name:    "Large Database",
+			Status:  StatusOK,
+			Message: "N/A (no database)",
+		}
+	}
+
+	ctx := context.Background()
+	store, err := dolt.NewFromConfigWithCLIOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
+	if err != nil {
+		return DoctorCheck{
+			Name:    "Large Database",
+			Status:  StatusOK,
+			Message: "N/A (unable to open database)",
+		}
+	}
+	defer func() { _ = store.Close() }()
+
+	return checkDatabaseSizeWithStore(store)
+}
+
+// CheckDatabaseSizeWithStore checks database size using a shared store (GH#2636).
+func CheckDatabaseSizeWithStore(ss *SharedStore) DoctorCheck {
+	store := ss.Store()
+	if store == nil {
+		return DoctorCheck{
+			Name:    "Large Database",
+			Status:  StatusOK,
+			Message: "N/A (no database)",
+		}
+	}
+	return checkDatabaseSizeWithStore(store)
+}
+
+func checkDatabaseSizeWithStore(store *dolt.DoltStore) DoctorCheck {
+	ctx := context.Background()
+
+	// Read threshold from config (default 5000, 0 = disabled)
+	threshold := 5000
+	thresholdStr, err := store.GetConfig(ctx, "doctor.suggest_pruning_issue_count")
+	if err == nil && thresholdStr != "" {
+		if _, err := fmt.Sscanf(thresholdStr, "%d", &threshold); err != nil {
+			threshold = 5000 // Reset to default on parse error
+		}
+	}
+
+	if threshold == 0 {
+		return DoctorCheck{
+			Name:    "Large Database",
+			Status:  StatusOK,
+			Message: "Check disabled (threshold = 0)",
+		}
+	}
+
+	stats, err := store.GetStatistics(ctx)
+	if err != nil {
+		return DoctorCheck{
+			Name:    "Large Database",
+			Status:  StatusOK,
+			Message: "N/A (unable to count issues)",
+		}
+	}
+
+	if stats.ClosedIssues > threshold {
+		return DoctorCheck{
+			Name:    "Large Database",
+			Status:  StatusWarning,
+			Message: fmt.Sprintf("%d closed issues (threshold: %d)", stats.ClosedIssues, threshold),
+			Detail:  "Large number of closed issues may impact performance",
+			Fix:     "Consider running 'bd cleanup --older-than 90' to prune old closed issues",
+		}
+	}
+
+	return DoctorCheck{
+		Name:    "Large Database",
+		Status:  StatusOK,
+		Message: fmt.Sprintf("%d closed issues (threshold: %d)", stats.ClosedIssues, threshold),
+	}
 }

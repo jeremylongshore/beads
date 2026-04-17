@@ -174,7 +174,7 @@ async function testBasicWorkflow(npmPrefix) {
   const env = {
     ...process.env,
     PATH: `${path.join(npmPrefix, 'bin')}:${process.env.PATH}`,
-    BD_ACTOR: 'integration-test'
+    BEADS_ACTOR: 'integration-test'
   };
 
   try {
@@ -223,7 +223,7 @@ async function testBasicWorkflow(npmPrefix) {
 
     // Test bd update
     logInfo('Testing bd update...');
-    exec(`"${bdCmd}" update ${issue.id} --status in_progress`, { cwd: projectDir, env });
+    exec(`"${bdCmd}" update ${issue.id} --claim`, { cwd: projectDir, env });
     const updatedOutput = exec(`"${bdCmd}" show ${issue.id} --json`, { cwd: projectDir, env });
     const updatedResult = JSON.parse(updatedOutput);
     const updatedIssue = Array.isArray(updatedResult) ? updatedResult[0] : updatedResult;
@@ -276,7 +276,7 @@ async function testClaudeCodeWebSimulation(npmPrefix) {
     const env = {
       ...process.env,
       PATH: `${path.join(npmPrefix, 'bin')}:${process.env.PATH}`,
-      BD_ACTOR: 'claude-agent'
+      BEADS_ACTOR: 'claude-agent'
     };
 
     // First session: initialize and create an issue
@@ -371,6 +371,7 @@ async function testPlatformDetection() {
     const supportedPlatforms = {
       darwin: ['x64', 'arm64'],
       linux: ['x64', 'arm64'],
+      android: ['arm64'],  // Only arm64 built for android/termux
       win32: ['x64', 'arm64']
     };
 

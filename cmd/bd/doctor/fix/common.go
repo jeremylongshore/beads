@@ -6,11 +6,18 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/steveyegge/beads/internal/beads"
 )
 
 // ErrTestBinary is returned when getBdBinary detects it's running as a test binary.
 // This prevents fork bombs when tests call functions that execute bd subcommands.
 var ErrTestBinary = fmt.Errorf("running as test binary - cannot execute bd subcommands")
+
+func newBdCmd(bdBinary string, args ...string) *exec.Cmd {
+	cmd := exec.Command(bdBinary, args...) // #nosec G204 -- bdBinary from validated executable path
+	return cmd
+}
 
 // getBdBinary returns the path to the bd binary to use for fix operations.
 // It prefers the current executable to avoid command injection attacks.
@@ -100,4 +107,11 @@ func isWithinWorkspace(root, candidate string) bool {
 		return false
 	}
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)))
+}
+
+// resolveBeadsDir follows .beads/redirect files to find the actual beads directory.
+// If no redirect exists, returns the original path unchanged.
+// This is a wrapper around beads.FollowRedirect for use within the fix package.
+func resolveBeadsDir(beadsDir string) string {
+	return beads.FollowRedirect(beadsDir)
 }

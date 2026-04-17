@@ -1,3 +1,5 @@
+//go:build cgo
+
 package main
 
 import (
@@ -6,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/sqlite"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -20,7 +22,7 @@ func TestValidatePrefix(t *testing.T) {
 		{"valid with numbers", "work1-", false},
 		{"valid with hyphen", "my-work-", false},
 		{"empty", "", true},
-		{"too long", "verylongprefix-", true},
+		{"long prefix ok", "verylongprefix-", false}, // No length limit (GH#770)
 		{"starts with number", "1work-", true},
 		{"uppercase", "KW-", true},
 		{"no hyphen", "kw", false},
@@ -42,9 +44,9 @@ func TestRenamePrefixCommand(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
 
-	testStore, err := sqlite.New(context.Background(), dbPath)
+	testStore, err := dolt.New(context.Background(), &dolt.Config{Path: dbPath})
 	if err != nil {
-		t.Fatalf("Failed to create test database: %v", err)
+		t.Skipf("skipping: Dolt server not available: %v", err)
 	}
 	defer testStore.Close()
 
@@ -170,9 +172,9 @@ func TestRenamePrefixInDB(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
 
-	testStore, err := sqlite.New(context.Background(), dbPath)
+	testStore, err := dolt.New(context.Background(), &dolt.Config{Path: dbPath})
 	if err != nil {
-		t.Fatalf("Failed to create test database: %v", err)
+		t.Skipf("skipping: Dolt server not available: %v", err)
 	}
 	t.Cleanup(func() {
 		testStore.Close()

@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bufio"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,14 +9,9 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/ncruces/go-sqlite3/driver"
-	_ "github.com/ncruces/go-sqlite3/embed"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/cmd/bd/doctor"
-	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
-	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/syncbranch"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -39,29 +32,37 @@ type doctorCheck struct {
 }
 
 type doctorResult struct {
-	Path       string            `json:"path"`
-	Checks     []doctorCheck     `json:"checks"`
-	OverallOK  bool              `json:"overall_ok"`
-	CLIVersion string            `json:"cli_version"`
-	Timestamp  string            `json:"timestamp,omitempty"`  // bd-9cc: ISO8601 timestamp for historical tracking
-	Platform   map[string]string `json:"platform,omitempty"`   // bd-9cc: platform info for debugging
+	Path            string            `json:"path"`
+	Checks          []doctorCheck     `json:"checks"`
+	OverallOK       bool              `json:"overall_ok"`
+	CLIVersion      string            `json:"cli_version"`
+	Timestamp       string            `json:"timestamp,omitempty"`        // ISO8601 timestamp for historical tracking
+	Platform        map[string]string `json:"platform,omitempty"`         // platform info for debugging
+	SuppressedCount int               `json:"suppressed_count,omitempty"` // GH#1095: number of suppressed warnings
 }
 
 var (
-	doctorFix         bool
-	doctorYes         bool
-	doctorInteractive bool   // bd-3xl: per-fix confirmation mode
-	doctorDryRun      bool   // bd-a5z: preview fixes without applying
-	doctorOutput      string // bd-9cc: export diagnostics to file
-	perfMode          bool
-	checkHealthMode   bool
+	doctorFix                       bool
+	doctorYes                       bool
+	doctorInteractive               bool   // per-fix confirmation mode
+	doctorDryRun                    bool   // preview fixes without applying
+	doctorOutput                    string // export diagnostics to file
+	doctorFixChildParent            bool   // opt-in fix for child→parent deps
+	doctorVerbose                   bool   // show detailed output during fixes
+	perfMode                        bool
+	checkHealthMode                 bool
+	doctorCheckFlag                 string // run specific check (e.g., "pollution")
+	doctorClean                     bool   // for pollution check, delete detected issues
+	doctorDeep                      bool   // full graph integrity validation
+	doctorOrchestrator              bool   // running in orchestrator multi-workspace mode
+	orchestratorDuplicatesThreshold int    // duplicate tolerance threshold for orchestrator mode
+	doctorServer                    bool   // run server mode health checks
+	doctorMigration                 string // migration validation mode: "pre" or "post"
+	doctorAgent                     bool   // agent-facing diagnostic mode (ZFC-compliant)
 )
 
 // ConfigKeyHintsDoctor is the config key for suppressing doctor hints
 const ConfigKeyHintsDoctor = "hints.doctor"
-
-// minSyncBranchHookVersion is the minimum hook version that supports sync-branch bypass (issue #532)
-const minSyncBranchHookVersion = "0.29.0"
 
 var doctorCmd = &cobra.Command{
 	Use:     "doctor [path]",
@@ -76,10 +77,6 @@ This command checks:
   - Whether using hash-based vs sequential IDs
   - If CLI version is current (checks GitHub releases)
   - If Claude plugin is current (when running in Claude Code)
-  - Multiple database files
-  - Multiple JSONL files
-  - Daemon health (version mismatches, stale processes)
-  - Database-JSONL sync status
   - File permissions
   - Circular dependencies
   - Git hooks (pre-commit, post-merge, pre-push)
@@ -97,35 +94,141 @@ Export Mode (--output):
   Save diagnostics to a JSON file for historical analysis and bug reporting.
   Includes timestamp and platform info for tracking intermittent issues.
 
+Specific Check Mode (--check):
+  Run a specific check in detail. Available checks:
+  - artifacts: Detect and optionally clean beads classic artifacts
+    (stale JSONL, SQLite files, cruft .beads dirs). Use with --clean.
+  - conventions: Check for convention drift (lint warnings, stale
+    issues, orphaned issues). Advisory only - warns, never blocks.
+  - pollution: Detect and optionally clean test issues from database
+  - validate: Run focused data-integrity checks (duplicates, orphaned
+    deps, test pollution, git conflicts). Use with --fix to auto-repair.
+
+Deep Validation Mode (--deep):
+  Validate full graph integrity. May be slow on large databases.
+  Additional checks:
+  - Parent consistency: All parent-child deps point to existing issues
+  - Dependency integrity: All deps reference valid issues
+  - Epic completeness: Find epics ready to close (all children closed)
+  - Agent bead integrity: Agent beads have valid state values
+  - Mail thread integrity: Thread IDs reference existing issues
+  - Molecule integrity: Molecules have valid parent-child structures
+
+Server Mode (--server):
+  Run health checks for Dolt server mode connections (bd-dolt.2.3):
+  - Server reachable: Can connect to configured host:port?
+  - Dolt version: Is it a Dolt server (not vanilla MySQL)?
+  - Database exists: Does the 'beads' database exist?
+  - Schema compatible: Can query beads tables?
+  - Connection pool: Pool health metrics
+
+Migration Validation Mode (--migration):
+  Run Dolt migration validation checks with machine-parseable output.
+  Use --migration=pre before migration to verify readiness:
+  - JSONL file exists and is valid (parseable, no corruption)
+  - All JSONL issues are present in SQLite (or explains discrepancies)
+  - No blocking issues prevent migration
+  Use --migration=post after migration to verify completion:
+  - Dolt database exists and is healthy
+  - All issues from JSONL are present in Dolt
+  - No data was lost during migration
+  - Dolt database has no locks or uncommitted changes
+  Combine with --json for machine-parseable output for automation.
+
+Agent Mode (--agent):
+  Output diagnostics designed for AI agent consumption. Instead of terse
+  pass/fail messages, each issue includes:
+  - Observed state: what the system actually looks like
+  - Expected state: what it should look like
+  - Explanation: full prose context about the issue and why it matters
+  - Commands: exact remediation commands to run
+  - Source files: where in the codebase to investigate further
+  - Severity: blocking (prevents operation), degraded (partial function),
+    or advisory (informational only)
+  ZFC-compliant: Go observes and reports, the agent decides and acts.
+  Combine with --json for structured agent-facing output.
+
+Suppressing Warnings:
+  Suppress specific warnings by setting doctor.suppress.<check-slug> config:
+    bd config set doctor.suppress.pending-migrations true
+    bd config set doctor.suppress.git-hooks true
+  Check names are converted to slugs: "Git Hooks" → "git-hooks".
+  Only warnings are suppressed; errors and passing checks always show.
+  To unsuppress: bd config unset doctor.suppress.<slug>
+
 Examples:
   bd doctor              # Check current directory
   bd doctor /path/to/repo # Check specific repository
   bd doctor --json       # Machine-readable output
+  bd doctor --agent      # Agent-facing diagnostic output
+  bd doctor --agent --json  # Structured agent diagnostics (JSON)
   bd doctor --fix        # Automatically fix issues (with confirmation)
   bd doctor --fix --yes  # Automatically fix issues (no confirmation)
-  bd doctor --fix -i     # Confirm each fix individually (bd-3xl)
+  bd doctor --fix -i     # Confirm each fix individually
+  bd doctor --fix --fix-child-parent  # Also fix child→parent deps (opt-in)
+  bd doctor --fix --force # Force repair even when database can't be opened
+  bd doctor --fix --source=jsonl # Rebuild database from JSONL (source of truth)
   bd doctor --dry-run    # Preview what --fix would do without making changes
   bd doctor --perf       # Performance diagnostics
-  bd doctor --output diagnostics.json  # Export diagnostics to file`,
+  bd doctor --output diagnostics.json  # Export diagnostics to file
+  bd doctor --check=artifacts           # Show classic artifacts (JSONL, SQLite, cruft dirs)
+  bd doctor --check=artifacts --clean  # Delete safe-to-delete artifacts (with confirmation)
+  bd doctor --check=conventions        # Convention drift check (lint, stale, orphans)
+  bd doctor --check=pollution          # Show potential test issues
+  bd doctor --check=pollution --clean  # Delete test issues (with confirmation)
+  bd doctor --check=validate         # Data-integrity checks only
+  bd doctor --check=validate --fix   # Auto-fix data-integrity issues
+  bd doctor --deep             # Full graph integrity validation
+  bd doctor --server           # Dolt server mode health checks
+  bd doctor --migration=pre    # Validate readiness for Dolt migration
+  bd doctor --migration=post   # Validate Dolt migration completed
+  bd doctor --migration=pre --json  # Machine-parseable migration validation`,
 	Run: func(cmd *cobra.Command, args []string) {
+		if isEmbeddedMode() {
+			fmt.Fprintln(os.Stderr, "Note: 'bd doctor' is not yet supported in embedded mode.")
+			fmt.Fprintln(os.Stderr, "")
+			fmt.Fprintln(os.Stderr, "For embedded mode troubleshooting:")
+			fmt.Fprintln(os.Stderr, "  • Verify database exists:  ls -la .beads/embeddeddolt/")
+			fmt.Fprintln(os.Stderr, "  • Check bd version:        bd version")
+			fmt.Fprintln(os.Stderr, "  • Reinitialize if needed:  bd init --force")
+			fmt.Fprintln(os.Stderr, "  • Switch to server mode:   bd init --server")
+			os.Exit(0)
+		}
 		// Use global jsonOutput set by PersistentPreRun
 
 		// Determine path to check
-		checkPath := "."
+		// Precedence: explicit arg > BEADS_DIR (parent) > CWD
+		var checkPath string
 		if len(args) > 0 {
 			checkPath = args[0]
+		} else if beadsDir := os.Getenv("BEADS_DIR"); beadsDir != "" {
+			// BEADS_DIR points to .beads directory, doctor needs parent
+			checkPath = filepath.Dir(beadsDir)
+		} else {
+			checkPath = "."
 		}
 
 		// Convert to absolute path
 		absPath, err := filepath.Abs(checkPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: failed to resolve path: %v\n", err)
-			os.Exit(1)
+			FatalError("failed to resolve path: %v", err)
+		}
+
+		// Guardrail: never run mutating bd doctor fix from orchestrator workspace root.
+		// Workspace roots have additional invariants beyond single-project repos;
+		// repairs should go through the orchestrator's own doctor command.
+		if doctorFix && isOrchestratorRoot(absPath) {
+			FatalErrorWithHint(
+				"refusing to run 'bd doctor --fix' at orchestrator workspace root",
+				"Run the orchestrator's doctor command from workspace root, or run 'bd doctor --fix' inside a specific project clone",
+			)
 		}
 
 		// Run performance diagnostics if --perf flag is set
 		if perfMode {
-			doctor.RunPerformanceDiagnostics(absPath)
+			if err := doctor.RunPerformanceDiagnostics(absPath); err != nil {
+				FatalError("performance diagnostics: %v", err)
+			}
 			return
 		}
 
@@ -135,35 +238,79 @@ Examples:
 			return
 		}
 
+		// Run specific check if --check flag is set
+		if doctorCheckFlag != "" {
+			switch doctorCheckFlag {
+			case "pollution":
+				runPollutionCheck(absPath, doctorClean, doctorYes)
+				return
+			case "validate":
+				runValidateCheck(absPath)
+				return
+			case "artifacts":
+				runArtifactsCheck(absPath, doctorClean, doctorYes)
+				return
+			case "conventions":
+				runConventionsCheck(absPath)
+				return
+			default:
+				FatalErrorWithHint(fmt.Sprintf("unknown check %q", doctorCheckFlag), "Available checks: artifacts, conventions, pollution, validate")
+			}
+		}
+
+		// Run deep validation if --deep flag is set
+		if doctorDeep {
+			runDeepValidation(absPath)
+			return
+		}
+
+		// Run server mode health checks if --server flag is set
+		if doctorServer {
+			runServerHealth(absPath)
+			return
+		}
+
+		// Run migration validation if --migration flag is set
+		if doctorMigration != "" {
+			runMigrationValidation(absPath, doctorMigration)
+			return
+		}
+
 		// Run diagnostics
 		result := runDiagnostics(absPath)
 
-		// bd-a5z: Preview fixes (dry-run) or apply fixes if requested
+		// Preview fixes (dry-run) or apply fixes if requested
 		if doctorDryRun {
 			previewFixes(result)
 		} else if doctorFix {
 			applyFixes(result)
-			// Re-run diagnostics to show results
+			fmt.Println("\nVerifying fixes...")
 			result = runDiagnostics(absPath)
 		}
 
-		// bd-9cc: Add timestamp and platform info for export
+		// Add timestamp and platform info for export
 		if doctorOutput != "" || jsonOutput {
 			result.Timestamp = time.Now().UTC().Format(time.RFC3339)
 			result.Platform = doctor.CollectPlatformInfo(absPath)
 		}
 
-		// bd-9cc: Export to file if --output specified
+		// Export to file if --output specified
 		if doctorOutput != "" {
 			if err := exportDiagnostics(result, doctorOutput); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: failed to export diagnostics: %v\n", err)
-				os.Exit(1)
+				FatalError("failed to export diagnostics: %v", err)
 			}
 			fmt.Printf("✓ Diagnostics exported to %s\n", doctorOutput)
 		}
 
 		// Output results
-		if jsonOutput {
+		if doctorAgent {
+			agentResult := buildAgentResult(result)
+			if jsonOutput {
+				outputJSON(agentResult)
+			} else {
+				printAgentDiagnostics(agentResult)
+			}
+		} else if jsonOutput {
 			outputJSON(result)
 		} else if doctorOutput == "" {
 			// Only print to console if not exporting (to avoid duplicate output)
@@ -180,376 +327,19 @@ Examples:
 func init() {
 	doctorCmd.Flags().BoolVar(&doctorFix, "fix", false, "Automatically fix issues where possible")
 	doctorCmd.Flags().BoolVarP(&doctorYes, "yes", "y", false, "Skip confirmation prompt (for non-interactive use)")
-	doctorCmd.Flags().BoolVarP(&doctorInteractive, "interactive", "i", false, "Confirm each fix individually (bd-3xl)")
-	doctorCmd.Flags().BoolVar(&doctorDryRun, "dry-run", false, "Preview fixes without making changes (bd-a5z)")
+	doctorCmd.Flags().BoolVarP(&doctorInteractive, "interactive", "i", false, "Confirm each fix individually")
+	doctorCmd.Flags().BoolVar(&doctorDryRun, "dry-run", false, "Preview fixes without making changes")
+	doctorCmd.Flags().BoolVar(&doctorFixChildParent, "fix-child-parent", false, "Remove child→parent dependencies (opt-in)")
+	doctorCmd.Flags().BoolVarP(&doctorVerbose, "verbose", "v", false, "Show all checks (default shows only warnings/errors)")
+	doctorCmd.Flags().BoolVar(&doctorOrchestrator, "orchestrator", false, "Running in orchestrator multi-workspace mode (routes.jsonl is expected, higher duplicate tolerance)")
+	doctorCmd.Flags().IntVar(&orchestratorDuplicatesThreshold, "orchestrator-duplicates-threshold", 1000, "Duplicate tolerance threshold for orchestrator mode (wisps are ephemeral)")
+	doctorCmd.Flags().BoolVar(&doctorServer, "server", false, "Run Dolt server mode health checks (connectivity, version, schema)")
+	doctorCmd.Flags().StringVar(&doctorMigration, "migration", "", "Run Dolt migration validation: 'pre' (before migration) or 'post' (after migration)")
+	doctorCmd.Flags().BoolVar(&doctorAgent, "agent", false, "Agent-facing diagnostic mode: rich context for AI agents (ZFC-compliant)")
 }
 
-// previewFixes shows what would be fixed without applying changes (bd-a5z)
-func previewFixes(result doctorResult) {
-	// Collect all fixable issues
-	var fixableIssues []doctorCheck
-	for _, check := range result.Checks {
-		if (check.Status == statusWarning || check.Status == statusError) && check.Fix != "" {
-			fixableIssues = append(fixableIssues, check)
-		}
-	}
-
-	if len(fixableIssues) == 0 {
-		fmt.Println("\n✓ No fixable issues found (dry-run)")
-		return
-	}
-
-	fmt.Println("\n[DRY-RUN] The following issues would be fixed with --fix:")
-	fmt.Println()
-
-	for i, issue := range fixableIssues {
-		// Show the issue details
-		fmt.Printf("  %d. %s\n", i+1, issue.Name)
-		if issue.Status == statusError {
-			fmt.Printf("     Status: %s\n", ui.RenderFail("ERROR"))
-		} else {
-			fmt.Printf("     Status: %s\n", ui.RenderWarn("WARNING"))
-		}
-		fmt.Printf("     Issue:  %s\n", issue.Message)
-		if issue.Detail != "" {
-			fmt.Printf("     Detail: %s\n", issue.Detail)
-		}
-		fmt.Printf("     Fix:    %s\n", issue.Fix)
-		fmt.Println()
-	}
-
-	fmt.Printf("[DRY-RUN] Would attempt to fix %d issue(s)\n", len(fixableIssues))
-	fmt.Println("Run 'bd doctor --fix' to apply these fixes")
-}
-
-func applyFixes(result doctorResult) {
-	// Collect all fixable issues
-	var fixableIssues []doctorCheck
-	for _, check := range result.Checks {
-		if (check.Status == statusWarning || check.Status == statusError) && check.Fix != "" {
-			fixableIssues = append(fixableIssues, check)
-		}
-	}
-
-	if len(fixableIssues) == 0 {
-		fmt.Println("\nNo fixable issues found.")
-		return
-	}
-
-	// Show what will be fixed
-	fmt.Println("\nFixable issues:")
-	for i, issue := range fixableIssues {
-		fmt.Printf("  %d. %s: %s\n", i+1, issue.Name, issue.Message)
-	}
-
-	// bd-3xl: Interactive mode - confirm each fix individually
-	if doctorInteractive {
-		applyFixesInteractive(result.Path, fixableIssues)
-		return
-	}
-
-	// Ask for confirmation (skip if --yes flag is set)
-	if !doctorYes {
-		fmt.Printf("\nThis will attempt to fix %d issue(s). Continue? (Y/n): ", len(fixableIssues))
-		reader := bufio.NewReader(os.Stdin)
-		response, err := reader.ReadString('\n')
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error reading input: %v\n", err)
-			return
-		}
-
-		response = strings.TrimSpace(strings.ToLower(response))
-		if response != "" && response != "y" && response != "yes" {
-			fmt.Println("Fix canceled.")
-			return
-		}
-	}
-
-	// Apply fixes
-	fmt.Println("\nApplying fixes...")
-	applyFixList(result.Path, fixableIssues)
-}
-
-// applyFixesInteractive prompts for each fix individually (bd-3xl)
-func applyFixesInteractive(path string, issues []doctorCheck) {
-	reader := bufio.NewReader(os.Stdin)
-	applyAll := false
-	var approvedFixes []doctorCheck
-
-	fmt.Println("\nReview each fix:")
-	fmt.Println("  [y]es - apply this fix")
-	fmt.Println("  [n]o  - skip this fix")
-	fmt.Println("  [a]ll - apply all remaining fixes")
-	fmt.Println("  [q]uit - stop without applying more fixes")
-	fmt.Println()
-
-	for i, issue := range issues {
-		// Show issue details
-		fmt.Printf("(%d/%d) %s\n", i+1, len(issues), issue.Name)
-		if issue.Status == statusError {
-			fmt.Printf("  Status: %s\n", ui.RenderFail("ERROR"))
-		} else {
-			fmt.Printf("  Status: %s\n", ui.RenderWarn("WARNING"))
-		}
-		fmt.Printf("  Issue:  %s\n", issue.Message)
-		if issue.Detail != "" {
-			fmt.Printf("  Detail: %s\n", issue.Detail)
-		}
-		fmt.Printf("  Fix:    %s\n", issue.Fix)
-
-		// Check if we should apply all remaining
-		if applyAll {
-			fmt.Println("  → Auto-approved (apply all)")
-			approvedFixes = append(approvedFixes, issue)
-			continue
-		}
-
-		// Prompt for this fix
-		fmt.Print("\n  Apply this fix? [y/n/a/q]: ")
-		response, err := reader.ReadString('\n')
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error reading input: %v\n", err)
-			return
-		}
-
-		response = strings.TrimSpace(strings.ToLower(response))
-		switch response {
-		case "y", "yes":
-			approvedFixes = append(approvedFixes, issue)
-			fmt.Println("  → Approved")
-		case "n", "no", "":
-			fmt.Println("  → Skipped")
-		case "a", "all":
-			applyAll = true
-			approvedFixes = append(approvedFixes, issue)
-			fmt.Println("  → Approved (applying all remaining)")
-		case "q", "quit":
-			fmt.Println("  → Quit")
-			if len(approvedFixes) > 0 {
-				fmt.Printf("\nApplying %d approved fix(es)...\n", len(approvedFixes))
-				applyFixList(path, approvedFixes)
-			} else {
-				fmt.Println("\nNo fixes applied.")
-			}
-			return
-		default:
-			// Treat unknown input as skip
-			fmt.Println("  → Skipped (unrecognized input)")
-		}
-		fmt.Println()
-	}
-
-	// Apply all approved fixes
-	if len(approvedFixes) > 0 {
-		fmt.Printf("\nApplying %d approved fix(es)...\n", len(approvedFixes))
-		applyFixList(path, approvedFixes)
-	} else {
-		fmt.Println("\nNo fixes approved.")
-	}
-}
-
-// applyFixList applies a list of fixes and reports results
-func applyFixList(path string, fixes []doctorCheck) {
-	fixedCount := 0
-	errorCount := 0
-
-	for _, check := range fixes {
-		fmt.Printf("\nFixing %s...\n", check.Name)
-
-		var err error
-		switch check.Name {
-		case "Gitignore":
-			err = doctor.FixGitignore()
-		case "Git Hooks":
-			err = fix.GitHooks(path)
-		case "Daemon Health":
-			err = fix.Daemon(path)
-		case "DB-JSONL Sync":
-			err = fix.DBJSONLSync(path)
-		case "Permissions":
-			err = fix.Permissions(path)
-		case "Database":
-			err = fix.DatabaseVersion(path)
-		case "Schema Compatibility":
-			err = fix.SchemaCompatibility(path)
-		case "Repo Fingerprint":
-			err = fix.RepoFingerprint(path)
-		case "Git Merge Driver":
-			err = fix.MergeDriver(path)
-		case "Sync Branch Config":
-			// No auto-fix: sync-branch should be added to config.yaml (version controlled)
-			fmt.Printf("  ⚠ Add 'sync-branch: beads-sync' to .beads/config.yaml\n")
-			continue
-		case "Database Config":
-			err = fix.DatabaseConfig(path)
-		case "JSONL Config":
-			err = fix.LegacyJSONLConfig(path)
-		case "Deletions Manifest":
-			err = fix.MigrateTombstones(path)
-		case "Untracked Files":
-			err = fix.UntrackedJSONL(path)
-		case "Sync Branch Health":
-			// Get sync branch from config
-			syncBranch := syncbranch.GetFromYAML()
-			if syncBranch == "" {
-				fmt.Printf("  ⚠ No sync branch configured in config.yaml\n")
-				continue
-			}
-			err = fix.SyncBranchHealth(path, syncBranch)
-		case "Merge Artifacts":
-			err = fix.MergeArtifacts(path)
-		case "Orphaned Dependencies":
-			err = fix.OrphanedDependencies(path)
-		case "Duplicate Issues":
-			// No auto-fix: duplicates require user review
-			fmt.Printf("  ⚠ Run 'bd duplicates' to review and merge duplicates\n")
-			continue
-		case "Test Pollution":
-			// No auto-fix: test cleanup requires user review
-			fmt.Printf("  ⚠ Run 'bd detect-pollution' to review and clean test issues\n")
-			continue
-		case "Git Conflicts":
-			// No auto-fix: git conflicts require manual resolution
-			fmt.Printf("  ⚠ Resolve conflicts manually: git checkout --ours or --theirs .beads/issues.jsonl\n")
-			continue
-		default:
-			fmt.Printf("  ⚠ No automatic fix available for %s\n", check.Name)
-			fmt.Printf("  Manual fix: %s\n", check.Fix)
-			continue
-		}
-
-		if err != nil {
-			errorCount++
-			fmt.Printf("  %s Error: %v\n", ui.RenderFail("✗"), err)
-			fmt.Printf("  Manual fix: %s\n", check.Fix)
-		} else {
-			fixedCount++
-			fmt.Printf("  %s Fixed\n", ui.RenderPass("✓"))
-		}
-	}
-
-	// Summary
-	fmt.Printf("\nFix summary: %d fixed, %d errors\n", fixedCount, errorCount)
-	if errorCount > 0 {
-		fmt.Println("\nSome fixes failed. Please review the errors above and apply manual fixes as needed.")
-	}
-}
-
-// runCheckHealth runs lightweight health checks for git hooks.
-// Silent on success, prints a hint if issues detected.
-// Respects hints.doctor config setting.
-func runCheckHealth(path string) {
-	beadsDir := filepath.Join(path, ".beads")
-
-	// Check if .beads/ exists
-	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
-		// No .beads directory - nothing to check
-		return
-	}
-
-	// Get database path once (bd-b8h: centralized path resolution)
-	dbPath := getCheckHealthDBPath(beadsDir)
-
-	// Check if database exists
-	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		// No database - only check hooks
-		if issue := doctor.CheckHooksQuick(Version); issue != "" {
-			printCheckHealthHint([]string{issue})
-		}
-		return
-	}
-
-	// Open database once for all checks (bd-xyc: single DB connection)
-	db, err := sql.Open("sqlite3", "file:"+dbPath+"?mode=ro")
-	if err != nil {
-		// Can't open DB - only check hooks
-		if issue := doctor.CheckHooksQuick(Version); issue != "" {
-			printCheckHealthHint([]string{issue})
-		}
-		return
-	}
-	defer db.Close()
-
-	// Check if hints.doctor is disabled in config
-	if hintsDisabledDB(db) {
-		return
-	}
-
-	// Run lightweight checks
-	var issues []string
-
-	// Check 1: Database version mismatch (CLI vs database bd_version)
-	if issue := checkVersionMismatchDB(db); issue != "" {
-		issues = append(issues, issue)
-	}
-
-	// Check 2: Sync branch not configured (now reads from config.yaml, not DB)
-	if issue := doctor.CheckSyncBranchQuick(); issue != "" {
-		issues = append(issues, issue)
-	}
-
-	// Check 3: Outdated git hooks
-	if issue := doctor.CheckHooksQuick(Version); issue != "" {
-		issues = append(issues, issue)
-	}
-
-	// Check 3: Sync-branch hook compatibility (issue #532)
-	if issue := doctor.CheckSyncBranchHookQuick(path); issue != "" {
-		issues = append(issues, issue)
-	}
-
-	// If any issues found, print hint
-	if len(issues) > 0 {
-		printCheckHealthHint(issues)
-	}
-	// Silent exit on success
-}
-
-// printCheckHealthHint prints the health check hint and exits with error.
-func printCheckHealthHint(issues []string) {
-	fmt.Fprintf(os.Stderr, "💡 bd doctor recommends a health check:\n")
-	for _, issue := range issues {
-		fmt.Fprintf(os.Stderr, "   • %s\n", issue)
-	}
-	fmt.Fprintf(os.Stderr, "   Run 'bd doctor' for details, or 'bd doctor --fix' to auto-repair\n")
-	fmt.Fprintf(os.Stderr, "   (Suppress with: bd config set %s false)\n", ConfigKeyHintsDoctor)
-	os.Exit(1)
-}
-
-// getCheckHealthDBPath returns the database path for check-health operations.
-// This centralizes the path resolution logic (bd-b8h).
-func getCheckHealthDBPath(beadsDir string) string {
-	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
-		return cfg.DatabasePath(beadsDir)
-	}
-	return filepath.Join(beadsDir, beads.CanonicalDatabaseName)
-}
-
-// hintsDisabledDB checks if hints.doctor is set to "false" using an existing DB connection.
-// Used by runCheckHealth to avoid multiple DB opens (bd-xyc).
-func hintsDisabledDB(db *sql.DB) bool {
-	var value string
-	err := db.QueryRow("SELECT value FROM config WHERE key = ?", ConfigKeyHintsDoctor).Scan(&value)
-	if err != nil {
-		return false // Key not set, assume hints enabled
-	}
-	return strings.ToLower(value) == "false"
-}
-
-// checkVersionMismatchDB checks if CLI version differs from database bd_version.
-// Uses an existing DB connection (bd-xyc).
-func checkVersionMismatchDB(db *sql.DB) string {
-	var dbVersion string
-	err := db.QueryRow("SELECT value FROM metadata WHERE key = 'bd_version'").Scan(&dbVersion)
-	if err != nil {
-		return "" // Can't read version, skip
-	}
-
-	if dbVersion != "" && dbVersion != Version {
-		return fmt.Sprintf("Version mismatch (CLI: %s, database: %s)", Version, dbVersion)
-	}
-
-	return ""
+func shouldSkipDoctorNetworkChecks() bool {
+	return jsonOutput || !ui.IsTerminal()
 }
 
 func runDiagnostics(path string) doctorResult {
@@ -557,6 +347,15 @@ func runDiagnostics(path string) doctorResult {
 		Path:       path,
 		CLIVersion: Version,
 		OverallOK:  true,
+	}
+
+	// Auto-detect orchestrator mode: routes.jsonl is only created by orchestrator workspaces
+	if !doctorOrchestrator {
+		resolvedBeadsDir := doctor.ResolveBeadsDirForRepo(path)
+		routesFile := filepath.Join(resolvedBeadsDir, "routes.jsonl")
+		if _, err := os.Stat(routesFile); err == nil {
+			doctorOrchestrator = true
+		}
 	}
 
 	// Check 1: Installation (.beads/ directory)
@@ -567,14 +366,18 @@ func runDiagnostics(path string) doctorResult {
 	}
 
 	// Check Git Hooks early (even if .beads/ doesn't exist yet)
-	hooksCheck := convertWithCategory(doctor.CheckGitHooks(), doctor.CategoryGit)
+	hooksCheck := convertWithCategory(doctor.CheckGitHooks(Version), doctor.CategoryGit)
 	result.Checks = append(result.Checks, hooksCheck)
 	// Don't fail overall check for missing hooks, just warn
 
-	// Check sync-branch hook compatibility (issue #532)
-	syncBranchHookCheck := convertWithCategory(doctor.CheckSyncBranchHookCompatibility(path), doctor.CategoryGit)
-	result.Checks = append(result.Checks, syncBranchHookCheck)
-	if syncBranchHookCheck.Status == statusError {
+	// Check for stale .legacy hook sidecars calling removed "bd hook" command (GH#2398)
+	legacyCheck := convertWithCategory(doctor.CheckStaleLegacyHooks(), doctor.CategoryGit)
+	result.Checks = append(result.Checks, legacyCheck)
+
+	// Check git hooks Dolt compatibility (hooks without Dolt check cause errors)
+	doltHooksCheck := convertWithCategory(doctor.CheckGitHooksDoltCompatibility(path), doctor.CategoryGit)
+	result.Checks = append(result.Checks, doltHooksCheck)
+	if doltHooksCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
@@ -583,7 +386,7 @@ func runDiagnostics(path string) doctorResult {
 		return result
 	}
 
-	// Check 1a: Fresh clone detection (bd-4ew)
+	// Check 1a: Fresh clone detection
 	// Must come early - if this is a fresh clone, other checks may be misleading
 	freshCloneCheck := convertWithCategory(doctor.CheckFreshClone(path), doctor.CategoryCore)
 	result.Checks = append(result.Checks, freshCloneCheck)
@@ -591,69 +394,114 @@ func runDiagnostics(path string) doctorResult {
 		result.OverallOK = false
 	}
 
+	// Check 1b: Metadata config file (GH#2478)
+	// Must come before database checks since they depend on metadata.json.
+	beadsDir := doctor.ResolveBeadsDirForRepo(path)
+	configPath := configfile.ConfigPath(beadsDir)
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		metaCheck := doctorCheck{
+			Name:     "Metadata Config",
+			Status:   statusError,
+			Message:  "metadata.json is missing",
+			Fix:      "Run 'bd doctor --fix' to regenerate with defaults, or 'bd init --force'",
+			Category: doctor.CategoryCore,
+		}
+		result.Checks = append(result.Checks, metaCheck)
+		result.OverallOK = false
+	} else {
+		result.Checks = append(result.Checks, doctorCheck{
+			Name:     "Metadata Config",
+			Status:   statusOK,
+			Message:  "metadata.json present",
+			Category: doctor.CategoryCore,
+		})
+	}
+
+	// bd-jgxi: Auto-migrate database version before checking it.
+	// Since doctor skips PersistentPreRun DB init (it's in noDbCommands),
+	// trackBdVersion() and autoMigrateOnVersionBump() haven't run yet.
+	//
+	// Scope version tracking to the doctor target. Without this, `bd doctor <path>`
+	// can accidentally touch the caller's current repo .beads state.
+	origBeadsDir, hadBeadsDir := os.LookupEnv("BEADS_DIR")
+	_ = os.Setenv("BEADS_DIR", beadsDir)
+	trackBdVersion()
+	if hadBeadsDir {
+		_ = os.Setenv("BEADS_DIR", origBeadsDir)
+	} else {
+		_ = os.Unsetenv("BEADS_DIR")
+	}
+
+	autoMigrateOnVersionBump(beadsDir)
+
+	// Check 1b: Dolt format compatibility (GH#2137)
+	// Must run before opening the database — old noms formats cause server panics.
+	doltFormatCheck := convertWithCategory(doctor.CheckDoltFormat(path), doctor.CategoryCore)
+	result.Checks = append(result.Checks, doltFormatCheck)
+	if doltFormatCheck.Status == statusError {
+		result.OverallOK = false
+	}
+
+	// GH#2636: Open a single shared store for all database checks.
+	// This prevents the infinite Dolt server restart loop that occurred when each
+	// check opened and closed its own store (each close kills the server, each
+	// open restarts it). The shared store stays alive for the entire doctor run.
+	sharedStore := doctor.NewSharedStore(path)
+	defer sharedStore.Close()
+
 	// Check 2: Database version
-	dbCheck := convertWithCategory(doctor.CheckDatabaseVersion(path, Version), doctor.CategoryCore)
+	dbCheck := convertWithCategory(doctor.CheckDatabaseVersionWithStore(sharedStore, Version), doctor.CategoryCore)
 	result.Checks = append(result.Checks, dbCheck)
 	if dbCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
-	// Check 2a: Schema compatibility (bd-ckvw)
-	schemaCheck := convertWithCategory(doctor.CheckSchemaCompatibility(path), doctor.CategoryCore)
+	// Check 2a: Schema compatibility
+	schemaCheck := convertWithCategory(doctor.CheckSchemaCompatibilityWithStore(sharedStore), doctor.CategoryCore)
 	result.Checks = append(result.Checks, schemaCheck)
 	if schemaCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
 	// Check 2b: Repo fingerprint (detects wrong database or URL change)
-	fingerprintCheck := convertWithCategory(doctor.CheckRepoFingerprint(path), doctor.CategoryCore)
+	fingerprintCheck := convertWithCategory(doctor.CheckRepoFingerprintWithStore(sharedStore, path), doctor.CategoryCore)
 	result.Checks = append(result.Checks, fingerprintCheck)
 	if fingerprintCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
-	// Check 2c: Database integrity (bd-2au)
-	integrityCheck := convertWithCategory(doctor.CheckDatabaseIntegrity(path), doctor.CategoryCore)
+	// Check 2c: Database integrity
+	integrityCheck := convertWithCategory(doctor.CheckDatabaseIntegrityWithStore(sharedStore), doctor.CategoryCore)
 	result.Checks = append(result.Checks, integrityCheck)
 	if integrityCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
 	// Check 3: ID format (hash vs sequential)
-	idCheck := convertWithCategory(doctor.CheckIDFormat(path), doctor.CategoryCore)
+	idCheck := convertWithCategory(doctor.CheckIDFormatWithStore(sharedStore), doctor.CategoryCore)
 	result.Checks = append(result.Checks, idCheck)
 	if idCheck.Status == statusWarning {
 		result.OverallOK = false
 	}
 
-	// Check 4: CLI version (GitHub)
-	versionCheck := convertWithCategory(doctor.CheckCLIVersion(Version), doctor.CategoryCore)
+	// Network-based update checks are skipped in machine-readable and other
+	// non-interactive contexts so doctor remains deterministic under wrappers.
+	versionCheckFn := doctor.CheckCLIVersion
+	pluginCheckFn := doctor.CheckClaudePlugin
+	if shouldSkipDoctorNetworkChecks() {
+		versionCheckFn = doctor.CheckCLIVersionLocalOnly
+		pluginCheckFn = doctor.CheckClaudePluginLocalOnly
+	}
+
+	// Check 4: CLI version
+	versionCheck := convertWithCategory(versionCheckFn(Version), doctor.CategoryCore)
 	result.Checks = append(result.Checks, versionCheck)
 	// Don't fail overall check for outdated CLI, just warn
 
 	// Check 4.5: Claude plugin version (if running in Claude Code)
-	pluginCheck := convertWithCategory(doctor.CheckClaudePlugin(), doctor.CategoryIntegration)
+	pluginCheck := convertWithCategory(pluginCheckFn(), doctor.CategoryIntegration)
 	result.Checks = append(result.Checks, pluginCheck)
 	// Don't fail overall check for outdated plugin, just warn
-
-	// Check 5: Multiple database files
-	multiDBCheck := convertWithCategory(doctor.CheckMultipleDatabases(path), doctor.CategoryData)
-	result.Checks = append(result.Checks, multiDBCheck)
-	if multiDBCheck.Status == statusWarning || multiDBCheck.Status == statusError {
-		result.OverallOK = false
-	}
-
-	// Check 6: Multiple JSONL files (excluding merge artifacts)
-	jsonlCheck := convertWithCategory(doctor.CheckLegacyJSONLFilename(path), doctor.CategoryData)
-	result.Checks = append(result.Checks, jsonlCheck)
-	if jsonlCheck.Status == statusWarning || jsonlCheck.Status == statusError {
-		result.OverallOK = false
-	}
-
-	// Check 6a: Legacy JSONL config (bd-6xd: migrate beads.jsonl to issues.jsonl)
-	legacyConfigCheck := convertWithCategory(doctor.CheckLegacyJSONLConfig(path), doctor.CategoryData)
-	result.Checks = append(result.Checks, legacyConfigCheck)
-	// Don't fail overall check for legacy config, just warn
 
 	// Check 7: Database/JSONL configuration mismatch
 	configCheck := convertWithCategory(doctor.CheckDatabaseConfig(path), doctor.CategoryData)
@@ -662,50 +510,119 @@ func runDiagnostics(path string) doctorResult {
 		result.OverallOK = false
 	}
 
-	// Check 7a: Configuration value validation (bd-alz)
-	configValuesCheck := convertWithCategory(doctor.CheckConfigValues(path), doctor.CategoryData)
+	// Check 7a: Configuration value validation
+	configValuesCheck := convertWithCategory(doctor.CheckConfigValuesWithStore(path, sharedStore), doctor.CategoryData)
 	result.Checks = append(result.Checks, configValuesCheck)
 	// Don't fail overall check for config value warnings, just warn
 
-	// Check 8: Daemon health
-	daemonCheck := convertWithCategory(doctor.CheckDaemonStatus(path, Version), doctor.CategoryRuntime)
-	result.Checks = append(result.Checks, daemonCheck)
-	if daemonCheck.Status == statusWarning || daemonCheck.Status == statusError {
+	// Check 7a1: Project identity (GH#2372 backfill)
+	projectIDCheck := convertWithCategory(doctor.CheckProjectIdentityWithStore(sharedStore, path), doctor.CategoryData)
+	result.Checks = append(result.Checks, projectIDCheck)
+	if projectIDCheck.Status == statusWarning || projectIDCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
-	// Check 9: Database-JSONL sync
-	syncCheck := convertWithCategory(doctor.CheckDatabaseJSONLSync(path), doctor.CategoryData)
-	result.Checks = append(result.Checks, syncCheck)
-	if syncCheck.Status == statusWarning || syncCheck.Status == statusError {
+	// Check 7b: Multi-repo custom types discovery (bd-9ji4z)
+	multiRepoTypesCheck := convertWithCategory(doctor.CheckMultiRepoTypes(path), doctor.CategoryData)
+	result.Checks = append(result.Checks, multiRepoTypesCheck)
+	// Don't fail overall check for multi-repo types, just informational
+
+	// Check 7c: Role configuration (beads.role)
+	roleCheck := convertDoctorCheck(doctor.CheckBeadsRoleWithStore(path, sharedStore))
+	result.Checks = append(result.Checks, roleCheck)
+	// Don't fail overall check for role config, just warn - URL heuristic fallback still works
+
+	// Check 7e: Stale lock files (bootstrap, sync, startup)
+	staleLockCheck := convertDoctorCheck(doctor.CheckStaleLockFiles(path))
+	result.Checks = append(result.Checks, staleLockCheck)
+	if staleLockCheck.Status == statusWarning || staleLockCheck.Status == statusError {
 		result.OverallOK = false
 	}
+
+	// Check 7e2: Stale circuit breaker files
+	circuitCheck := convertDoctorCheck(doctor.CheckCircuitBreaker())
+	result.Checks = append(result.Checks, circuitCheck)
+	if circuitCheck.Status == statusWarning || circuitCheck.Status == statusError {
+		result.OverallOK = false
+	}
+
+	// Check 7f: Remote consistency (SQL vs CLI)
+	remoteCheck := convertWithCategory(doctor.CheckRemoteConsistency(path), doctor.CategoryData)
+	result.Checks = append(result.Checks, remoteCheck)
+	// Don't fail overall for remote discrepancies, just warn
+
+	// Dolt health checks (connection, schema, issue count, status).
+	for _, dc := range doctor.RunDoltHealthChecks(path) {
+		result.Checks = append(result.Checks, convertDoctorCheck(dc))
+	}
+
+	// Federation health checks (bd-wkumz.6)
+	// Check 8d: Federation remotesapi port accessibility
+	remotesAPICheck := convertWithCategory(doctor.CheckFederationRemotesAPI(path), doctor.CategoryFederation)
+	result.Checks = append(result.Checks, remotesAPICheck)
+	// Don't fail overall for federation issues - they're only relevant for Dolt users
+
+	// Check 8e: Federation peer connectivity
+	peerConnCheck := convertWithCategory(doctor.CheckFederationPeerConnectivity(path), doctor.CategoryFederation)
+	result.Checks = append(result.Checks, peerConnCheck)
+
+	// Check 8f: Federation sync staleness
+	syncStalenessCheck := convertWithCategory(doctor.CheckFederationSyncStaleness(path), doctor.CategoryFederation)
+	result.Checks = append(result.Checks, syncStalenessCheck)
+
+	// Check 8g: Federation conflict detection
+	fedConflictsCheck := convertWithCategory(doctor.CheckFederationConflicts(path), doctor.CategoryFederation)
+	result.Checks = append(result.Checks, fedConflictsCheck)
+	if fedConflictsCheck.Status == statusError {
+		result.OverallOK = false // Unresolved conflicts are a real problem
+	}
+
+	// Check 8h: Dolt server mode configuration check
+	doltModeCheck := convertWithCategory(doctor.CheckDoltServerModeMismatch(path), doctor.CategoryFederation)
+	result.Checks = append(result.Checks, doltModeCheck)
 
 	// Check 9: Permissions
-	permCheck := convertWithCategory(doctor.CheckPermissions(path), doctor.CategoryCore)
+	permCheck := convertWithCategory(doctor.CheckPermissionsWithStore(path, sharedStore), doctor.CategoryCore)
 	result.Checks = append(result.Checks, permCheck)
 	if permCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
 	// Check 10: Dependency cycles
-	cycleCheck := convertWithCategory(doctor.CheckDependencyCycles(path), doctor.CategoryMetadata)
+	cycleCheck := convertWithCategory(doctor.CheckDependencyCyclesWithStore(sharedStore), doctor.CategoryMetadata)
 	result.Checks = append(result.Checks, cycleCheck)
 	if cycleCheck.Status == statusError || cycleCheck.Status == statusWarning {
 		result.OverallOK = false
 	}
 
 	// Check 11: Claude integration
-	claudeCheck := convertWithCategory(doctor.CheckClaude(), doctor.CategoryIntegration)
+	claudeCheck := convertWithCategory(doctor.CheckClaude(path), doctor.CategoryIntegration)
 	result.Checks = append(result.Checks, claudeCheck)
 	// Don't fail overall check for missing Claude integration, just warn
 
-	// Check 11a: bd in PATH (needed for Claude hooks to work)
+	// Check 11a: Claude settings file health (malformed JSON detection)
+	claudeSettingsCheck := convertWithCategory(doctor.CheckClaudeSettingsHealth(path), doctor.CategoryIntegration)
+	result.Checks = append(result.Checks, claudeSettingsCheck)
+	if claudeSettingsCheck.Status == statusError {
+		result.OverallOK = false // Malformed settings is a real problem
+	}
+
+	// Check 11b: Claude hook completeness (both SessionStart and PreCompact)
+	claudeHookCheck := convertWithCategory(doctor.CheckClaudeHookCompleteness(path), doctor.CategoryIntegration)
+	result.Checks = append(result.Checks, claudeHookCheck)
+	// Don't fail overall check for incomplete hooks, just warn
+
+	// Check 11c: bd prime output verification
+	bdPrimeOutputCheck := convertWithCategory(doctor.VerifyPrimeOutput(path), doctor.CategoryIntegration)
+	result.Checks = append(result.Checks, bdPrimeOutputCheck)
+	// Don't fail overall check for prime output issues, just warn
+
+	// Check 11e: bd in PATH (needed for Claude hooks to work)
 	bdPathCheck := convertWithCategory(doctor.CheckBdInPath(), doctor.CategoryIntegration)
 	result.Checks = append(result.Checks, bdPathCheck)
 	// Don't fail overall check for missing bd in PATH, just warn
 
-	// Check 11b: Documentation bd prime references match installed version
+	// Check 11f: Documentation bd prime references match installed version
 	bdPrimeDocsCheck := convertWithCategory(doctor.CheckDocumentationBdPrimeReference(path), doctor.CategoryIntegration)
 	result.Checks = append(result.Checks, bdPrimeDocsCheck)
 	// Don't fail overall check for doc mismatch, just warn
@@ -720,63 +637,95 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, legacyDocsCheck)
 	// Don't fail overall check for legacy docs, just warn
 
+	// Check 13a: MCP tool references in documentation
+	mcpToolRefsCheck := convertWithCategory(doctor.CheckLegacyMCPToolReferences(path), doctor.CategoryIntegration)
+	result.Checks = append(result.Checks, mcpToolRefsCheck)
+	// Don't fail overall check for MCP tool refs, just warn
+
 	// Check 14: Gitignore up to date
-	gitignoreCheck := convertWithCategory(doctor.CheckGitignore(), doctor.CategoryGit)
+	gitignoreCheck := convertWithCategory(doctor.CheckGitignore(path), doctor.CategoryGit)
 	result.Checks = append(result.Checks, gitignoreCheck)
 	// Don't fail overall check for gitignore, just warn
 
-	// Check 15: Git merge driver configuration
-	mergeDriverCheck := convertWithCategory(doctor.CheckMergeDriver(path), doctor.CategoryGit)
-	result.Checks = append(result.Checks, mergeDriverCheck)
-	// Don't fail overall check for merge driver, just warn
+	// Check 14a: Project-root .gitignore has Dolt exclusion patterns (GH#2034)
+	projectGitignoreCheck := convertWithCategory(doctor.CheckProjectGitignore(path), doctor.CategoryGit)
+	result.Checks = append(result.Checks, projectGitignoreCheck)
+	// Don't fail overall check for project gitignore, just warn
 
-	// Check 16: Metadata.json version tracking (bd-u4sb)
+	// Check 14b: redirect file tracking (worktree redirect files shouldn't be committed)
+	redirectTrackingCheck := convertWithCategory(doctor.CheckRedirectNotTracked(path), doctor.CategoryGit)
+	result.Checks = append(result.Checks, redirectTrackingCheck)
+	// Don't fail overall check for redirect tracking, just warn
+
+	// Check 14c: redirect target validity (target exists and has valid db)
+	redirectTargetCheck := convertWithCategory(doctor.CheckRedirectTargetValid(path), doctor.CategoryGit)
+	result.Checks = append(result.Checks, redirectTargetCheck)
+	// Don't fail overall check for redirect target, just warn
+
+	// Check 14d: redirect target sync worktree (target has beads-sync if needed)
+	redirectTargetSyncCheck := convertWithCategory(doctor.CheckRedirectTargetSyncWorktree(path), doctor.CategoryGit)
+	result.Checks = append(result.Checks, redirectTargetSyncCheck)
+	// Don't fail overall check for redirect target sync, just warn
+
+	// Check 14e: vestigial sync worktrees (unused worktrees in redirected repos)
+	vestigialWorktreesCheck := convertWithCategory(doctor.CheckNoVestigialSyncWorktrees(path), doctor.CategoryGit)
+	result.Checks = append(result.Checks, vestigialWorktreesCheck)
+	// Don't fail overall check for vestigial worktrees, just warn
+
+	// Check 14g: last-touched file tracking (runtime state shouldn't be committed)
+	lastTouchedTrackingCheck := convertWithCategory(doctor.CheckLastTouchedNotTracked(path), doctor.CategoryGit)
+	result.Checks = append(result.Checks, lastTouchedTrackingCheck)
+	// Don't fail overall check for last-touched tracking, just warn
+
+	// Check 14h: tracked runtime/sensitive files (GH#2535)
+	trackedRuntimeCheck := convertDoctorCheck(doctor.CheckTrackedRuntimeFiles(path))
+	result.Checks = append(result.Checks, trackedRuntimeCheck)
+	if trackedRuntimeCheck.Status == statusError {
+		result.OverallOK = false // Sensitive files in git is a real problem
+	}
+
+	// Check 15a: Git working tree cleanliness (AGENTS.md hygiene)
+	gitWorkingTreeCheck := convertWithCategory(doctor.CheckGitWorkingTree(path), doctor.CategoryGit)
+	result.Checks = append(result.Checks, gitWorkingTreeCheck)
+	// Don't fail overall check for dirty working tree, just warn
+
+	// Check 15b: Git upstream sync (ahead/behind/diverged)
+	gitUpstreamCheck := convertWithCategory(doctor.CheckGitUpstream(path), doctor.CategoryGit)
+	result.Checks = append(result.Checks, gitUpstreamCheck)
+	// Don't fail overall check for upstream drift, just warn
+
+	// Check 16: Metadata.json version tracking
 	metadataCheck := convertWithCategory(doctor.CheckMetadataVersionTracking(path, Version), doctor.CategoryMetadata)
 	result.Checks = append(result.Checks, metadataCheck)
 	// Don't fail overall check for metadata, just warn
 
-	// Check 17: Sync branch configuration (bd-rsua)
-	syncBranchCheck := convertWithCategory(doctor.CheckSyncBranchConfig(path), doctor.CategoryGit)
-	result.Checks = append(result.Checks, syncBranchCheck)
-	// Don't fail overall check for missing sync.branch, just warn
-
-	// Check 17a: Sync branch health (bd-6rf)
-	syncBranchHealthCheck := convertWithCategory(doctor.CheckSyncBranchHealth(path), doctor.CategoryGit)
-	result.Checks = append(result.Checks, syncBranchHealthCheck)
-	// Don't fail overall check for sync branch health, just warn
-
-	// Check 17b: Orphaned issues - referenced in commits but still open (bd-5hrq)
+	// Check 17b: Orphaned issues - referenced in commits but still open
 	orphanedIssuesCheck := convertWithCategory(doctor.CheckOrphanedIssues(path), doctor.CategoryGit)
 	result.Checks = append(result.Checks, orphanedIssuesCheck)
 	// Don't fail overall check for orphaned issues, just warn
 
-	// Check 18: Deletions manifest (legacy, now replaced by tombstones)
+	// Check 18: Deletions manifest (legacy)
 	deletionsCheck := convertWithCategory(doctor.CheckDeletionsManifest(path), doctor.CategoryMetadata)
 	result.Checks = append(result.Checks, deletionsCheck)
 	// Don't fail overall check for missing deletions manifest, just warn
 
-	// Check 19: Tombstones health (bd-s3v)
-	tombstonesCheck := convertWithCategory(doctor.CheckTombstones(path), doctor.CategoryMetadata)
-	result.Checks = append(result.Checks, tombstonesCheck)
-	// Don't fail overall check for tombstone issues, just warn
-
-	// Check 20: Untracked .beads/*.jsonl files (bd-pbj)
+	// Check 20: Untracked .beads/*.jsonl files
 	untrackedCheck := convertWithCategory(doctor.CheckUntrackedBeadsFiles(path), doctor.CategoryData)
 	result.Checks = append(result.Checks, untrackedCheck)
 	// Don't fail overall check for untracked files, just warn
 
-	// Check 21: Merge artifacts (from bd clean)
-	mergeArtifactsCheck := convertDoctorCheck(doctor.CheckMergeArtifacts(path))
-	result.Checks = append(result.Checks, mergeArtifactsCheck)
-	// Don't fail overall check for merge artifacts, just warn
-
-	// Check 22: Orphaned dependencies (from bd repair-deps, bd validate)
+	// Check 21: Orphaned dependencies (from bd repair-deps, bd validate)
 	orphanedDepsCheck := convertDoctorCheck(doctor.CheckOrphanedDependencies(path))
 	result.Checks = append(result.Checks, orphanedDepsCheck)
 	// Don't fail overall check for orphaned deps, just warn
 
+	// Check 22a: Child→parent dependencies (anti-pattern)
+	childParentDepsCheck := convertDoctorCheck(doctor.CheckChildParentDependencies(path))
+	result.Checks = append(result.Checks, childParentDepsCheck)
+	// Don't fail overall check for child→parent deps, just warn
+
 	// Check 23: Duplicate issues (from bd validate)
-	duplicatesCheck := convertDoctorCheck(doctor.CheckDuplicateIssues(path))
+	duplicatesCheck := convertDoctorCheck(doctor.CheckDuplicateIssues(path, doctorOrchestrator, orchestratorDuplicatesThreshold))
 	result.Checks = append(result.Checks, duplicatesCheck)
 	// Don't fail overall check for duplicates, just warn
 
@@ -785,10 +734,164 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, pollutionCheck)
 	// Don't fail overall check for test pollution, just warn
 
-	// Check 25: Git conflicts in JSONL (from bd validate)
-	conflictsCheck := convertDoctorCheck(doctor.CheckGitConflicts(path))
-	result.Checks = append(result.Checks, conflictsCheck)
-	if conflictsCheck.Status == statusError {
+	// Check 26: Stale closed issues (maintenance)
+	staleClosedCheck := convertDoctorCheck(doctor.CheckStaleClosedIssues(path))
+	result.Checks = append(result.Checks, staleClosedCheck)
+	// Don't fail overall check for stale issues, just warn
+
+	// Check 26a: Stale molecules (complete but unclosed)
+	staleMoleculesCheck := convertDoctorCheck(doctor.CheckStaleMolecules(path))
+	result.Checks = append(result.Checks, staleMoleculesCheck)
+	// Don't fail overall check for stale molecules, just warn
+
+	// Check 26b: Persistent mol- issues (should have been ephemeral)
+	persistentMolCheck := convertDoctorCheck(doctor.CheckPersistentMolIssues(path))
+	result.Checks = append(result.Checks, persistentMolCheck)
+	// Don't fail overall check for persistent mol issues, just warn
+
+	// Check 26c: Legacy merge queue files (orchestrator mrqueue remnants)
+	staleMQFilesCheck := convertDoctorCheck(doctor.CheckStaleMQFiles(path))
+	result.Checks = append(result.Checks, staleMQFilesCheck)
+	// Don't fail overall check for legacy MQ files, just warn
+
+	// Check 26d: Patrol pollution (patrol digests, session beads)
+	patrolPollutionCheck := convertDoctorCheck(doctor.CheckPatrolPollution(path))
+	result.Checks = append(result.Checks, patrolPollutionCheck)
+	// Don't fail overall check for patrol pollution, just warn
+
+	// Check 29: Database size (pruning suggestion)
+	// Note: This check has no auto-fix - pruning is destructive and user-controlled
+	sizeCheck := convertDoctorCheck(doctor.CheckDatabaseSizeWithStore(sharedStore))
+	result.Checks = append(result.Checks, sizeCheck)
+	// Don't fail overall check for size warning, just inform
+
+	// Check 30: Pending migrations (summarizes all available migrations)
+	migrationsCheck := convertDoctorCheck(doctor.CheckPendingMigrations(path))
+	result.Checks = append(result.Checks, migrationsCheck)
+	// Status is determined by the check itself based on migration priorities
+	if migrationsCheck.Status == statusError {
+		result.OverallOK = false
+	}
+
+	// Check 31: KV store sync status
+	kvSyncCheck := convertDoctorCheck(doctor.CheckKVSyncStatus(path))
+	result.Checks = append(result.Checks, kvSyncCheck)
+	// Don't fail overall check for KV sync warning, just inform
+
+	// Check 32: Dolt locks (uncommitted changes)
+	doltLocksCheck := convertDoctorCheck(doctor.CheckDoltLocks(path))
+	result.Checks = append(result.Checks, doltLocksCheck)
+	// Don't fail overall check for Dolt locks, just warn
+
+	// Check 33: Classic artifacts (post-Dolt-migration cleanup)
+	classicArtifactsCheck := convertDoctorCheck(doctor.CheckClassicArtifacts(path))
+	result.Checks = append(result.Checks, classicArtifactsCheck)
+	// Don't fail overall check for classic artifacts, just warn
+
+	// Check 34: Linux btrfs NoCOW on .beads/ (GH nocow-beads-dolt-init)
+	// Warns when the dolt data directory sits on btrfs without FS_NOCOW_FL,
+	// which causes kworker thrashing on the hot append-only write path. Safe
+	// no-op on non-Linux and non-btrfs filesystems.
+	btrfsNoCowCheck := convertDoctorCheck(doctor.CheckBtrfsNoCOW(path))
+	result.Checks = append(result.Checks, btrfsNoCowCheck)
+	// Don't fail overall check for btrfs NoCOW, just warn
+
+	// GH#1095: Filter out suppressed checks (doctor.suppress.<slug> = true)
+	suppressed := doctor.GetSuppressedChecksWithStore(sharedStore)
+	if len(suppressed) > 0 {
+		var suppressedCount int
+		var filtered []doctorCheck
+		for _, check := range result.Checks {
+			slug := doctor.CheckNameToSlug(check.Name)
+			if suppressed[slug] && check.Status == statusWarning {
+				suppressedCount++
+				continue
+			}
+			filtered = append(filtered, check)
+		}
+		if suppressedCount > 0 {
+			result.Checks = filtered
+			// Recompute OverallOK after filtering
+			result.OverallOK = true
+			for _, check := range result.Checks {
+				if check.Status == statusError {
+					result.OverallOK = false
+					break
+				}
+				if check.Status == statusWarning {
+					// Some warnings are informational (don't fail), but
+					// replicate the per-check logic from above is complex.
+					// Conservative: don't change OverallOK for warnings here.
+				}
+			}
+			// Store suppressed count for display
+			result.SuppressedCount = suppressedCount
+		}
+	}
+
+	return result
+}
+
+// runInitDiagnostics runs a limited subset of diagnostics appropriate for a
+// freshly-initialized project. Unlike runDiagnostics (which checks everything),
+// this only validates that the init itself succeeded: the .beads directory exists,
+// the database is openable with correct schema, and permissions are correct.
+// Checks that require git, federation remotes, or other post-setup configuration
+// are skipped since they cannot be satisfied in a fresh project.
+func runInitDiagnostics(path string) doctorResult {
+	result := doctorResult{
+		Path:       path,
+		CLIVersion: Version,
+		OverallOK:  true,
+	}
+
+	// Check 1: Installation (.beads/ directory)
+	installCheck := convertWithCategory(doctor.CheckInstallation(path), doctor.CategoryCore)
+	result.Checks = append(result.Checks, installCheck)
+	if installCheck.Status != statusOK {
+		result.OverallOK = false
+		return result
+	}
+
+	// Check 1b: Dolt format compatibility (GH#2137)
+	doltFormatCheck := convertWithCategory(doctor.CheckDoltFormat(path), doctor.CategoryCore)
+	result.Checks = append(result.Checks, doltFormatCheck)
+	if doltFormatCheck.Status == statusError {
+		result.OverallOK = false
+	}
+
+	// Check 2: Database version
+	dbCheck := convertWithCategory(doctor.CheckDatabaseVersion(path, Version), doctor.CategoryCore)
+	result.Checks = append(result.Checks, dbCheck)
+	if dbCheck.Status == statusError {
+		result.OverallOK = false
+	}
+
+	// Check 3: Schema compatibility
+	schemaCheck := convertWithCategory(doctor.CheckSchemaCompatibility(path), doctor.CategoryCore)
+	result.Checks = append(result.Checks, schemaCheck)
+	if schemaCheck.Status == statusError {
+		result.OverallOK = false
+	}
+
+	// Check 4: Permissions
+	permCheck := convertWithCategory(doctor.CheckPermissions(path), doctor.CategoryCore)
+	result.Checks = append(result.Checks, permCheck)
+	if permCheck.Status == statusError {
+		result.OverallOK = false
+	}
+
+	// Check 5: Dolt connection — validates init actually created a working DB
+	doltConnCheck := convertDoctorCheck(doctor.CheckDoltConnection(path))
+	result.Checks = append(result.Checks, doltConnCheck)
+	if doltConnCheck.Status == statusError {
+		result.OverallOK = false
+	}
+
+	// Check 6: Dolt schema — validates tables were created
+	doltSchemaCheck := convertDoctorCheck(doctor.CheckDoltSchema(path))
+	result.Checks = append(result.Checks, doltSchemaCheck)
+	if doltSchemaCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
@@ -814,7 +917,7 @@ func convertWithCategory(dc doctor.DoctorCheck, category string) doctorCheck {
 	return check
 }
 
-// exportDiagnostics writes the doctor result to a JSON file (bd-9cc)
+// exportDiagnostics writes the doctor result to a JSON file
 func exportDiagnostics(result doctorResult, outputPath string) error {
 	// #nosec G304 - outputPath is a user-provided flag value for file generation
 	f, err := os.Create(outputPath)
@@ -833,59 +936,181 @@ func exportDiagnostics(result doctorResult, outputPath string) error {
 }
 
 func printDiagnostics(result doctorResult) {
-	// Print header with version
-	fmt.Printf("\nbd doctor v%s\n\n", result.CLIVersion)
-
-	// Group checks by category
+	// Pre-calculate counts and collect issues grouped by category
 	checksByCategory := make(map[string][]doctorCheck)
+	issuesByCategory := make(map[string][]doctorCheck)
+	var passCount, warnCount, failCount int
+	hasIssues := false
+
 	for _, check := range result.Checks {
 		cat := check.Category
 		if cat == "" {
 			cat = "Other"
 		}
 		checksByCategory[cat] = append(checksByCategory[cat], check)
+
+		switch check.Status {
+		case statusOK:
+			passCount++
+		case statusWarning:
+			warnCount++
+			issuesByCategory[cat] = append(issuesByCategory[cat], check)
+			hasIssues = true
+		case statusError:
+			failCount++
+			issuesByCategory[cat] = append(issuesByCategory[cat], check)
+			hasIssues = true
+		}
 	}
 
-	// Track counts
-	var passCount, warnCount, failCount int
-	var warnings []doctorCheck
+	// Print header with version and summary
+	fmt.Printf("\nbd doctor v%s", result.CLIVersion)
+	fmt.Printf("  %s  %s %d passed  %s %d warnings  %s %d errors\n",
+		ui.RenderSeparator(),
+		ui.RenderPassIcon(), passCount,
+		ui.RenderWarnIcon(), warnCount,
+		ui.RenderFailIcon(), failCount,
+	)
 
-	// Print checks by category in defined order
+	if doctorVerbose {
+		// Verbose mode: show all checks grouped by category
+		fmt.Println()
+		printAllChecks(checksByCategory)
+	}
+
+	// Print warnings/errors grouped by category
+	if hasIssues {
+		fmt.Println()
+
+		// Walk categories in defined order, only showing those with issues
+		for _, category := range doctor.CategoryOrder {
+			issues, exists := issuesByCategory[category]
+			if !exists || len(issues) == 0 {
+				continue
+			}
+
+			// Sort within category: errors first, then warnings
+			slices.SortStableFunc(issues, func(a, b doctorCheck) int {
+				if a.Status == statusError && b.Status != statusError {
+					return -1
+				}
+				if a.Status != statusError && b.Status == statusError {
+					return 1
+				}
+				return 0
+			})
+
+			// Category header
+			catChecks := checksByCategory[category]
+			catPass := 0
+			for _, c := range catChecks {
+				if c.Status == statusOK {
+					catPass++
+				}
+			}
+			fmt.Printf("%s %s\n", ui.RenderCategory(category),
+				ui.RenderMuted(fmt.Sprintf("(%d/%d passed)", catPass, len(catChecks))))
+
+			for _, check := range issues {
+				line := fmt.Sprintf("%s: %s", check.Name, check.Message)
+				if check.Status == statusError {
+					fmt.Printf("  %s  %s\n", ui.RenderFailIcon(), ui.RenderFail(line))
+				} else {
+					fmt.Printf("  %s  %s\n", ui.RenderWarnIcon(), line)
+				}
+				if check.Detail != "" {
+					fmt.Printf("      %s\n", ui.RenderMuted(check.Detail))
+				}
+				if check.Fix != "" {
+					lines := strings.Split(check.Fix, "\n")
+					for j, fixLine := range lines {
+						if j == 0 {
+							fmt.Printf("      %s%s\n", ui.MutedStyle.Render(ui.TreeLast), fixLine)
+						} else {
+							fmt.Printf("        %s\n", fixLine)
+						}
+					}
+				}
+			}
+			fmt.Println()
+		}
+
+		// Handle "Other" category
+		if otherIssues, exists := issuesByCategory["Other"]; exists && len(otherIssues) > 0 {
+			fmt.Printf("%s\n", ui.RenderCategory("Other"))
+			for _, check := range otherIssues {
+				line := fmt.Sprintf("%s: %s", check.Name, check.Message)
+				if check.Status == statusError {
+					fmt.Printf("  %s  %s\n", ui.RenderFailIcon(), ui.RenderFail(line))
+				} else {
+					fmt.Printf("  %s  %s\n", ui.RenderWarnIcon(), line)
+				}
+				if check.Detail != "" {
+					fmt.Printf("      %s\n", ui.RenderMuted(check.Detail))
+				}
+				if check.Fix != "" {
+					lines := strings.Split(check.Fix, "\n")
+					for j, fixLine := range lines {
+						if j == 0 {
+							fmt.Printf("      %s%s\n", ui.MutedStyle.Render(ui.TreeLast), fixLine)
+						} else {
+							fmt.Printf("        %s\n", fixLine)
+						}
+					}
+				}
+			}
+			fmt.Println()
+		}
+
+		if !doctorVerbose {
+			fmt.Printf("%s\n", ui.RenderMuted("Run with --verbose to see all checks"))
+		}
+	} else {
+		fmt.Println()
+		fmt.Printf("%s\n", ui.RenderPass("✓ All checks passed"))
+		if !doctorVerbose {
+			fmt.Printf("%s\n", ui.RenderMuted("Run with --verbose to see all checks"))
+		}
+	}
+
+	// GH#1095: Notify user about suppressed checks
+	if result.SuppressedCount > 0 {
+		noun := "warning"
+		if result.SuppressedCount > 1 {
+			noun = "warnings"
+		}
+		fmt.Printf("%s\n", ui.RenderMuted(fmt.Sprintf("(%d %s suppressed via doctor.suppress config)", result.SuppressedCount, noun)))
+	}
+}
+
+// printAllChecks prints all checks grouped by category with section headers.
+func printAllChecks(checksByCategory map[string][]doctorCheck) {
+	// Print checks in defined category order
 	for _, category := range doctor.CategoryOrder {
 		checks, exists := checksByCategory[category]
 		if !exists || len(checks) == 0 {
 			continue
 		}
 
-		// Print category header
 		fmt.Println(ui.RenderCategory(category))
 
-		// Print each check in this category
 		for _, check := range checks {
-			// Determine status icon
 			var statusIcon string
 			switch check.Status {
 			case statusOK:
 				statusIcon = ui.RenderPassIcon()
-				passCount++
 			case statusWarning:
 				statusIcon = ui.RenderWarnIcon()
-				warnCount++
-				warnings = append(warnings, check)
 			case statusError:
 				statusIcon = ui.RenderFailIcon()
-				failCount++
-				warnings = append(warnings, check)
 			}
 
-			// Print check line: icon + name + message
 			fmt.Printf("  %s  %s", statusIcon, check.Name)
 			if check.Message != "" {
 				fmt.Printf("%s", ui.RenderMuted(" "+check.Message))
 			}
 			fmt.Println()
 
-			// Print detail if present (indented)
 			if check.Detail != "" {
 				fmt.Printf("     %s%s\n", ui.MutedStyle.Render(ui.TreeLast), ui.RenderMuted(check.Detail))
 			}
@@ -893,7 +1118,7 @@ func printDiagnostics(result doctorResult) {
 		fmt.Println()
 	}
 
-	// Print any checks without a category
+	// Print any checks without a known category
 	if otherChecks, exists := checksByCategory["Other"]; exists && len(otherChecks) > 0 {
 		fmt.Println(ui.RenderCategory("Other"))
 		for _, check := range otherChecks {
@@ -901,15 +1126,10 @@ func printDiagnostics(result doctorResult) {
 			switch check.Status {
 			case statusOK:
 				statusIcon = ui.RenderPassIcon()
-				passCount++
 			case statusWarning:
 				statusIcon = ui.RenderWarnIcon()
-				warnCount++
-				warnings = append(warnings, check)
 			case statusError:
 				statusIcon = ui.RenderFailIcon()
-				failCount++
-				warnings = append(warnings, check)
 			}
 			fmt.Printf("  %s  %s", statusIcon, check.Name)
 			if check.Message != "" {
@@ -922,55 +1142,114 @@ func printDiagnostics(result doctorResult) {
 		}
 		fmt.Println()
 	}
-
-	// Print summary line
-	fmt.Println(ui.RenderSeparator())
-	summary := fmt.Sprintf("%s %d passed  %s %d warnings  %s %d failed",
-		ui.RenderPassIcon(), passCount,
-		ui.RenderWarnIcon(), warnCount,
-		ui.RenderFailIcon(), failCount,
-	)
-	fmt.Println(summary)
-
-	// Print warnings/errors section with fixes
-	if len(warnings) > 0 {
-		fmt.Println()
-		fmt.Println(ui.RenderWarn(ui.IconWarn + "  WARNINGS"))
-
-		// Sort by severity: errors first, then warnings
-		slices.SortStableFunc(warnings, func(a, b doctorCheck) int {
-			// Errors (statusError) come before warnings (statusWarning)
-			if a.Status == statusError && b.Status != statusError {
-				return -1
-			}
-			if a.Status != statusError && b.Status == statusError {
-				return 1
-			}
-			return 0 // maintain original order within same severity
-		})
-
-		for i, check := range warnings {
-			// Show numbered items with icon and color based on status
-			// Errors get entire line in red, warnings just the number in yellow
-			line := fmt.Sprintf("%s: %s", check.Name, check.Message)
-			if check.Status == statusError {
-				fmt.Printf("  %s  %s %s\n", ui.RenderFailIcon(), ui.RenderFail(fmt.Sprintf("%d.", i+1)), ui.RenderFail(line))
-			} else {
-				fmt.Printf("  %s  %s %s\n", ui.RenderWarnIcon(), ui.RenderWarn(fmt.Sprintf("%d.", i+1)), line)
-			}
-			if check.Fix != "" {
-				fmt.Printf("        %s%s\n", ui.MutedStyle.Render(ui.TreeLast), check.Fix)
-			}
-		}
-	} else {
-		fmt.Println()
-		fmt.Printf("%s\n", ui.RenderPass("✓ All checks passed"))
-	}
 }
 
-func init() {
-	rootCmd.AddCommand(doctorCmd)
-	doctorCmd.Flags().BoolVar(&perfMode, "perf", false, "Run performance diagnostics and generate CPU profile")
-	doctorCmd.Flags().BoolVar(&checkHealthMode, "check-health", false, "Quick health check for git hooks (silent on success)")
-	doctorCmd.Flags().StringVarP(&doctorOutput, "output", "o", "", "Export diagnostics to JSON file (bd-9cc)")
+// runMigrationValidation runs Dolt migration validation checks.
+// Phase can be "pre" (before migration) or "post" (after migration).
+// Outputs machine-parseable JSON when --json flag is set.
+func runMigrationValidation(path string, phase string) {
+	var check doctorCheck
+	var result doctor.MigrationValidationResult
+
+	switch phase {
+	case "pre":
+		dc, mr := doctor.CheckMigrationReadiness(path)
+		check = convertDoctorCheck(dc)
+		result = mr
+	case "post":
+		dc, mr := doctor.CheckMigrationCompletion(path)
+		check = convertDoctorCheck(dc)
+		result = mr
+	default:
+		FatalError("invalid migration phase %q (use 'pre' or 'post')", phase)
+	}
+
+	// JSON output for machine consumption
+	if jsonOutput {
+		output := struct {
+			Check      doctorCheck                      `json:"check"`
+			Validation doctor.MigrationValidationResult `json:"validation"`
+			CLIVersion string                           `json:"cli_version"`
+			Timestamp  string                           `json:"timestamp"`
+		}{
+			Check:      check,
+			Validation: result,
+			CLIVersion: Version,
+			Timestamp:  time.Now().UTC().Format(time.RFC3339),
+		}
+		outputJSON(output)
+		if !result.Ready {
+			os.Exit(1)
+		}
+		return
+	}
+
+	// Human-readable output
+	fmt.Printf("\nbd doctor --migration=%s v%s\n\n", phase, Version)
+
+	// Print main status
+	var statusIcon string
+	switch check.Status {
+	case statusOK:
+		statusIcon = ui.RenderPassIcon()
+	case statusWarning:
+		statusIcon = ui.RenderWarnIcon()
+	case statusError:
+		statusIcon = ui.RenderFailIcon()
+	}
+
+	fmt.Printf("%s  %s: %s\n", statusIcon, check.Name, check.Message)
+	if check.Detail != "" {
+		for _, line := range strings.Split(check.Detail, "\n") {
+			fmt.Printf("     %s\n", ui.RenderMuted(line))
+		}
+	}
+
+	// Print validation details
+	fmt.Println()
+	fmt.Println(ui.RenderCategory("Validation Details"))
+	fmt.Printf("  Backend:     %s\n", result.Backend)
+	fmt.Printf("  JSONL Count: %d\n", result.JSONLCount)
+	if result.SQLiteCount > 0 {
+		fmt.Printf("  SQLite Count: %d\n", result.SQLiteCount)
+	}
+	if result.DoltCount > 0 {
+		fmt.Printf("  Dolt Count:  %d\n", result.DoltCount)
+	}
+	fmt.Printf("  JSONL Valid: %v\n", result.JSONLValid)
+	if result.JSONLMalformed > 0 {
+		fmt.Printf("  Malformed Lines: %d\n", result.JSONLMalformed)
+	}
+
+	// Print warnings
+	if len(result.Warnings) > 0 {
+		fmt.Println()
+		fmt.Println(ui.RenderCategory("Warnings"))
+		for _, warn := range result.Warnings {
+			fmt.Printf("  %s  %s\n", ui.RenderWarnIcon(), warn)
+		}
+	}
+
+	// Print errors
+	if len(result.Errors) > 0 {
+		fmt.Println()
+		fmt.Println(ui.RenderCategory("Errors"))
+		for _, err := range result.Errors {
+			fmt.Printf("  %s  %s\n", ui.RenderFailIcon(), err)
+		}
+	}
+
+	// Print fix suggestion
+	if check.Fix != "" {
+		fmt.Println()
+		fmt.Printf("%s  %s\n", ui.RenderMuted("Fix:"), check.Fix)
+	}
+
+	fmt.Println()
+	if result.Ready {
+		fmt.Printf("%s\n", ui.RenderPass("✓ Migration validation passed"))
+	} else {
+		fmt.Printf("%s\n", ui.RenderFail("✗ Migration validation failed"))
+		os.Exit(1)
+	}
 }

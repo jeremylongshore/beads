@@ -22,23 +22,19 @@ If you prefer step-by-step control:
 
 ### Pre-Release Checklist
 
-1. **Kill all running daemons (CRITICAL)**:
+1. **Stop all running Dolt servers (CRITICAL)**:
    ```bash
-   # Kill by process name
-   pkill -f "bd.*daemon"
-   
-   # Verify no daemons are running
-   pgrep -lf "bd.*daemon" || echo "No daemons running ✓"
-   
-   # Alternative: find and kill by socket
-   find ~/.config -name "bd.sock" -type f 2>/dev/null | while read sock; do
-     echo "Found daemon socket: $sock"
-   done
+   # Stop Dolt servers in all workspaces
+   bd dolt stop
+
+   # Or find and stop by process
+   pkill -f "dolt sql-server" 2>/dev/null
+   pgrep -lf "dolt sql-server" || echo "No Dolt servers running ✓"
    ```
-   
-   **Why this matters**: Old daemon versions can cause:
+
+   **Why this matters**: Old server versions can cause:
    - Auto-flush race conditions leaving working tree dirty after commits
-   - Version mismatches between client (new) and daemon (old)
+   - Version mismatches between client (new) and server (old)
    - Confusing behavior where changes appear to sync incorrectly
 
 2. **Run tests and build**:
@@ -131,77 +127,17 @@ TWINE_USERNAME=__token__ TWINE_PASSWORD=pypi-... uv tool run twine upload dist/*
 
 See [integrations/beads-mcp/PYPI.md](../integrations/beads-mcp/PYPI.md) for detailed PyPI instructions.
 
-### 3. Update Homebrew Formula
+### 3. Verify Homebrew Update
 
-**CRITICAL**: This step must be done AFTER GitHub Actions completes the release build (~5 minutes after pushing the tag).
+The Homebrew formula is now in homebrew-core and updates automatically via GitHub Release artifacts.
 
-**Why the wait?** The Homebrew formula uses GoReleaser artifacts (platform-specific binaries), not the source tarball. These are built by GitHub Actions.
-
-**Step 1: Wait for GitHub Actions to complete**
-
-Monitor the release workflow at: https://github.com/steveyegge/beads/actions
-
-Once complete, the release appears at: https://github.com/steveyegge/beads/releases/tag/v0.9.X
-
-**Step 2: Get SHA256s from release artifacts**
-
-GoReleaser creates a `checksums.txt` file with all artifact hashes:
-
-```bash
-# Download checksums file
-curl -sL https://github.com/steveyegge/beads/releases/download/v0.9.X/checksums.txt
-
-# Extract the SHA256s you need:
-# - beads_0.9.X_darwin_arm64.tar.gz (macOS Apple Silicon)
-# - beads_0.9.X_darwin_amd64.tar.gz (macOS Intel)
-# - beads_0.9.X_linux_amd64.tar.gz (Linux x86_64)
-# - beads_0.9.X_linux_arm64.tar.gz (Linux ARM64)
-```
-
-**Step 3: Update the formula**
-
-```bash
-# Navigate to tap repo (if already cloned) or clone it
-cd /tmp/homebrew-beads || git clone https://github.com/steveyegge/homebrew-beads /tmp/homebrew-beads
-
-# Pull latest changes
-cd /tmp/homebrew-beads
-git pull
-
-# Edit Formula/bd.rb - update:
-# 1. version "0.9.X" (line 4)
-# 2. SHA256 for darwin_arm64 (line 10)
-# 3. SHA256 for darwin_amd64 (line 13)
-# 4. SHA256 for linux_amd64 (line 23)
-# 5. SHA256 for linux_arm64 (line 20) - optional, often empty
-
-# Example:
-# version "0.23.0"
-# on_macos do
-#   if Hardware::CPU.arm?
-#     url "https://github.com/steveyegge/beads/releases/download/v#{version}/beads_#{version}_darwin_arm64.tar.gz"
-#     sha256 "abc123..."
-#   else
-#     url "https://github.com/steveyegge/beads/releases/download/v#{version}/beads_#{version}_darwin_amd64.tar.gz"
-#     sha256 "def456..."
-
-# Commit and push
-git add Formula/bd.rb
-git commit -m "Update bd formula to v0.9.X"
-git push origin main
-```
-
-**Step 4: CRITICAL - Verify the installation works**
+**Verify the installation works:**
 
 ```bash
 brew update
-brew upgrade bd  # Or: brew reinstall bd
-bd version  # MUST show v0.9.X - if not, the release is incomplete!
+brew upgrade beads  # Or: brew install beads
+bd version  # Should show v0.9.X
 ```
-
-**⚠️ DO NOT SKIP THE VERIFICATION STEP ABOVE** - This ensures users can actually install the new version.
-
-**Note**: Until this step is complete, users with Homebrew-installed bd will still have the old version.
 
 **Note:** If you have an old bd binary from `go install` in your PATH, remove it to avoid conflicts:
 ```bash
@@ -238,26 +174,38 @@ Monitor at: https://github.com/steveyegge/beads/actions
 
 The release will appear at: https://github.com/steveyegge/beads/releases
 
+### Documentation site (Docusaurus)
+
+The published docs at GitHub Pages are versioned. Unreleased edits live in `website/docs/` (**Next**); each release should add a snapshot:
+
+```bash
+cd website
+npm ci
+npm run docusaurus docs:version X.Y.Z
+```
+
+Then set `lastVersion` in `website/docusaurus.config.ts` to `X.Y.Z` so visitors default to the latest stable docs (not **Next**).
+
+Commit `website/versioned_docs/`, `website/versioned_sidebars/`, and `website/versions.json` with the release. The `scripts/generate-llms-full.sh` script pulls from the latest entry in `versions.json` so `llms-full.txt` stays aligned with that snapshot.
+
 ## Post-Release
 
-1. **Kill old daemons again**:
+1. **Stop old Dolt servers**:
    ```bash
-   pkill -f "bd.*daemon"
-   pgrep -lf "bd.*daemon" || echo "No daemons running ✓"
+   bd dolt stop
+   pkill -f "dolt sql-server" 2>/dev/null
+   pgrep -lf "dolt sql-server" || echo "No Dolt servers running ✓"
    ```
    This ensures your local machine picks up the new version immediately.
 
 2. **Verify installations**:
    ```bash
    # Homebrew
-   brew update && brew upgrade bd && bd version
-   
+   brew update && brew upgrade beads && bd version
+
    # PyPI
    pip install --upgrade beads-mcp
    beads-mcp --help
-   
-   # Check daemon version matches client
-   bd version --daemon  # Should match client version after first command
    ```
 
 3. **Announce** (optional):

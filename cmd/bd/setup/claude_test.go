@@ -1,11 +1,69 @@
 package setup
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/templates/agents"
 )
+
+func newClaudeTestEnv(t *testing.T) (claudeEnv, *bytes.Buffer, *bytes.Buffer) {
+	t.Helper()
+	root := t.TempDir()
+	projectDir := filepath.Join(root, "project")
+	homeDir := filepath.Join(root, "home")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+	if err := os.MkdirAll(homeDir, 0o755); err != nil {
+		t.Fatalf("mkdir home: %v", err)
+	}
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	env := claudeEnv{
+		stdout:     stdout,
+		stderr:     stderr,
+		homeDir:    homeDir,
+		projectDir: projectDir,
+		ensureDir:  EnsureDir,
+		readFile:   os.ReadFile,
+		writeFile: func(path string, data []byte) error {
+			return atomicWriteFile(path, data)
+		},
+	}
+	return env, stdout, stderr
+}
+
+func stubClaudeEnvProvider(t *testing.T, env claudeEnv, err error) {
+	t.Helper()
+	orig := claudeEnvProvider
+	claudeEnvProvider = func() (claudeEnv, error) {
+		if err != nil {
+			return claudeEnv{}, err
+		}
+		return env, nil
+	}
+	t.Cleanup(func() { claudeEnvProvider = orig })
+}
+
+func writeSettings(t *testing.T, path string, settings map[string]interface{}) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir settings dir: %v", err)
+	}
+	data, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal settings: %v", err)
+	}
+	if err := atomicWriteFile(path, data); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+}
 
 func TestAddHookCommand(t *testing.T) {
 	tests := []struct {
@@ -225,6 +283,95 @@ func TestRemoveHookCommand(t *testing.T) {
 	}
 }
 
+// TestRemoveHookCommandNoNull verifies that removing all hooks deletes the key
+// instead of setting it to null. GH#955: null values in hooks cause Claude Code to fail.
+func TestRemoveHookCommandNoNull(t *testing.T) {
+	hooks := map[string]interface{}{
+		"SessionStart": []interface{}{
+			map[string]interface{}{
+				"matcher": "",
+				"hooks": []interface{}{
+					map[string]interface{}{
+						"type":    "command",
+						"command": "bd prime",
+					},
+				},
+			},
+		},
+	}
+
+	removeHookCommand(hooks, "SessionStart", "bd prime")
+
+	// Key should be deleted, not set to null or empty array
+	if _, exists := hooks["SessionStart"]; exists {
+		t.Error("Expected SessionStart key to be deleted after removing all hooks")
+	}
+
+	// Verify JSON serialization doesn't produce null
+	data, err := json.Marshal(hooks)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(data), "null") {
+		t.Errorf("JSON contains null: %s", data)
+	}
+}
+
+// TestInstallClaudeCleanupNullHooks verifies that install cleans up existing null values.
+// GH#955: null values left by previous buggy removal cause Claude Code to fail.
+func TestInstallClaudeCleanupNullHooks(t *testing.T) {
+	env, stdout, _ := newClaudeTestEnv(t)
+
+	// Create settings file with null hooks (simulating the bug)
+	// Use project settings path (default install target)
+	settingsPath := projectSettingsPath(env.projectDir)
+	writeSettings(t, settingsPath, map[string]interface{}{
+		"hooks": map[string]interface{}{
+			"SessionStart": nil,
+			"PreCompact":   nil,
+		},
+	})
+
+	// Install should clean up null values and add proper hooks (global=false → project)
+	err := installClaude(env, false, false)
+	if err != nil {
+		t.Fatalf("install failed: %v", err)
+	}
+
+	// Verify hooks were properly added
+	if !strings.Contains(stdout.String(), "Registered SessionStart hook") {
+		t.Error("Expected SessionStart hook to be registered")
+	}
+
+	// Read back the file and verify no null values
+	data, err := env.readFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	if strings.Contains(string(data), "null") {
+		t.Errorf("Settings file still contains null: %s", data)
+	}
+
+	// Verify it parses as valid Claude settings
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("parse settings: %v", err)
+	}
+	hooks, ok := settings["hooks"].(map[string]interface{})
+	if !ok {
+		t.Fatal("hooks section missing")
+	}
+	for _, event := range []string{"SessionStart", "PreCompact"} {
+		eventHooks, ok := hooks[event].([]interface{})
+		if !ok {
+			t.Errorf("%s should be an array, not nil or missing", event)
+		}
+		if len(eventHooks) == 0 {
+			t.Errorf("%s should have hooks", event)
+		}
+	}
+}
+
 func TestHasBeadsHooks(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -405,4 +552,298 @@ func TestIdempotencyWithStealth(t *testing.T) {
 	if cmdMap["command"] != "bd prime --stealth" {
 		t.Errorf("Expected 'bd prime --stealth', got %v", cmdMap["command"])
 	}
+}
+
+func TestInstallClaudeProject(t *testing.T) {
+	env, stdout, stderr := newClaudeTestEnv(t)
+	// global=false means project-local (the new default)
+	if err := installClaude(env, false, false); err != nil {
+		t.Fatalf("installClaude: %v", err)
+	}
+	data, err := os.ReadFile(projectSettingsPath(env.projectDir))
+	if err != nil {
+		t.Fatalf("read project settings: %v", err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("unmarshal settings: %v", err)
+	}
+	if !hasBeadsHooks(projectSettingsPath(env.projectDir)) {
+		t.Fatal("project hooks not detected")
+	}
+	instructionsPath := filepath.Join(env.projectDir, claudeInstructionsFile)
+	instructions, err := os.ReadFile(instructionsPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", claudeInstructionsFile, err)
+	}
+	if !strings.Contains(string(instructions), "profile:minimal") {
+		t.Fatalf("expected minimal profile in %s", claudeInstructionsFile)
+	}
+	if !strings.Contains(stdout.String(), "project") {
+		t.Error("expected project installation message")
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("unexpected stderr output: %s", stderr.String())
+	}
+}
+
+func TestInstallClaudeGlobalStealth(t *testing.T) {
+	env, stdout, _ := newClaudeTestEnv(t)
+	// global=true, stealth=true
+	if err := installClaude(env, true, true); err != nil {
+		t.Fatalf("installClaude: %v", err)
+	}
+	data, err := os.ReadFile(globalSettingsPath(env.homeDir))
+	if err != nil {
+		t.Fatalf("read global settings: %v", err)
+	}
+	if !strings.Contains(string(data), "bd prime --stealth") {
+		t.Error("expected stealth command in settings")
+	}
+	instructionsPath := filepath.Join(env.projectDir, claudeInstructionsFile)
+	if _, err := os.Stat(instructionsPath); err != nil {
+		t.Fatalf("expected %s to be created: %v", claudeInstructionsFile, err)
+	}
+	if !strings.Contains(stdout.String(), "globally") {
+		t.Error("expected global installation message")
+	}
+}
+
+func TestInstallClaudeErrors(t *testing.T) {
+	t.Run("invalid json", func(t *testing.T) {
+		env, _, stderr := newClaudeTestEnv(t)
+		path := projectSettingsPath(env.projectDir)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(path, []byte("not json"), 0o644); err != nil {
+			t.Fatalf("write file: %v", err)
+		}
+		// global=false → project-local, should hit the invalid json
+		if err := installClaude(env, false, false); err == nil {
+			t.Fatal("expected parse error")
+		}
+		if !strings.Contains(stderr.String(), "failed to parse") {
+			t.Error("expected parse error output")
+		}
+	})
+
+	t.Run("ensure dir error", func(t *testing.T) {
+		env, _, _ := newClaudeTestEnv(t)
+		env.ensureDir = func(string, os.FileMode) error { return errors.New("boom") }
+		// global=false → project-local
+		if err := installClaude(env, false, false); err == nil {
+			t.Fatal("expected ensureDir error")
+		}
+	})
+}
+
+func TestCheckClaudeScenarios(t *testing.T) {
+	t.Run("global hooks", func(t *testing.T) {
+		env, stdout, _ := newClaudeTestEnv(t)
+		writeSettings(t, globalSettingsPath(env.homeDir), map[string]interface{}{
+			"hooks": map[string]interface{}{
+				"SessionStart": []interface{}{
+					map[string]interface{}{
+						"matcher": "",
+						"hooks": []interface{}{
+							map[string]interface{}{"type": "command", "command": "bd prime"},
+						},
+					},
+				},
+			},
+		})
+		if err := os.WriteFile(filepath.Join(env.projectDir, claudeInstructionsFile), []byte(agents.RenderSection(agents.ProfileMinimal)), 0o644); err != nil {
+			t.Fatalf("write %s: %v", claudeInstructionsFile, err)
+		}
+		if err := checkClaude(env); err != nil {
+			t.Fatalf("checkClaude: %v", err)
+		}
+		if !strings.Contains(stdout.String(), "Global hooks installed") {
+			t.Error("expected global hooks message")
+		}
+	})
+
+	t.Run("project hooks", func(t *testing.T) {
+		env, stdout, _ := newClaudeTestEnv(t)
+		writeSettings(t, projectSettingsPath(env.projectDir), map[string]interface{}{
+			"hooks": map[string]interface{}{
+				"PreCompact": []interface{}{
+					map[string]interface{}{
+						"matcher": "",
+						"hooks": []interface{}{
+							map[string]interface{}{"type": "command", "command": "bd prime"},
+						},
+					},
+				},
+			},
+		})
+		if err := os.WriteFile(filepath.Join(env.projectDir, claudeInstructionsFile), []byte(agents.RenderSection(agents.ProfileMinimal)), 0o644); err != nil {
+			t.Fatalf("write %s: %v", claudeInstructionsFile, err)
+		}
+		if err := checkClaude(env); err != nil {
+			t.Fatalf("checkClaude: %v", err)
+		}
+		if !strings.Contains(stdout.String(), "Project hooks installed") {
+			t.Error("expected project hooks message")
+		}
+	})
+
+	t.Run("missing hooks", func(t *testing.T) {
+		env, stdout, _ := newClaudeTestEnv(t)
+		if err := checkClaude(env); !errors.Is(err, errClaudeHooksMissing) {
+			t.Fatalf("expected errClaudeHooksMissing, got %v", err)
+		}
+		if !strings.Contains(stdout.String(), "Run: bd setup claude") {
+			t.Error("expected guidance message")
+		}
+	})
+
+	t.Run("missing instructions", func(t *testing.T) {
+		env, stdout, _ := newClaudeTestEnv(t)
+		writeSettings(t, globalSettingsPath(env.homeDir), map[string]interface{}{
+			"hooks": map[string]interface{}{
+				"SessionStart": []interface{}{
+					map[string]interface{}{
+						"matcher": "",
+						"hooks": []interface{}{
+							map[string]interface{}{"type": "command", "command": "bd prime"},
+						},
+					},
+				},
+			},
+		})
+		if err := checkClaude(env); !errors.Is(err, errAgentsFileMissing) {
+			t.Fatalf("expected errAgentsFileMissing, got %v", err)
+		}
+		if !strings.Contains(stdout.String(), claudeInstructionsFile+" not found") {
+			t.Fatalf("expected missing %s message, got: %s", claudeInstructionsFile, stdout.String())
+		}
+	})
+}
+
+func TestRemoveClaudeScenarios(t *testing.T) {
+	t.Run("remove global hooks", func(t *testing.T) {
+		env, stdout, _ := newClaudeTestEnv(t)
+		path := globalSettingsPath(env.homeDir)
+		writeSettings(t, path, map[string]interface{}{
+			"hooks": map[string]interface{}{
+				"SessionStart": []interface{}{
+					map[string]interface{}{
+						"matcher": "",
+						"hooks": []interface{}{
+							map[string]interface{}{"type": "command", "command": "bd prime"},
+							map[string]interface{}{"type": "command", "command": "other"},
+						},
+					},
+				},
+			},
+		})
+		instructionsPath := filepath.Join(env.projectDir, claudeInstructionsFile)
+		if err := os.WriteFile(instructionsPath, []byte(agents.RenderSection(agents.ProfileMinimal)), 0o644); err != nil {
+			t.Fatalf("seed %s: %v", claudeInstructionsFile, err)
+		}
+		// global=true → remove from global settings
+		if err := removeClaude(env, true); err != nil {
+			t.Fatalf("removeClaude: %v", err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read file: %v", err)
+		}
+		if strings.Contains(string(data), "bd prime") {
+			t.Error("expected bd prime hooks removed")
+		}
+		instructions, err := os.ReadFile(instructionsPath)
+		if err != nil {
+			t.Fatalf("read %s: %v", claudeInstructionsFile, err)
+		}
+		if strings.Contains(string(instructions), "BEGIN BEADS INTEGRATION") {
+			t.Fatalf("expected beads section removed from %s", claudeInstructionsFile)
+		}
+		if !strings.Contains(stdout.String(), "hooks removed") {
+			t.Error("expected success message")
+		}
+	})
+
+	t.Run("missing file", func(t *testing.T) {
+		env, stdout, _ := newClaudeTestEnv(t)
+		// global=false → project-local (default)
+		if err := removeClaude(env, false); err != nil {
+			t.Fatalf("removeClaude: %v", err)
+		}
+		if !strings.Contains(stdout.String(), "No settings file found") {
+			t.Error("expected missing file message")
+		}
+	})
+
+	t.Run("invalid json", func(t *testing.T) {
+		env, _, stderr := newClaudeTestEnv(t)
+		path := projectSettingsPath(env.projectDir)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(path, []byte("not json"), 0o644); err != nil {
+			t.Fatalf("write file: %v", err)
+		}
+		// global=false → project-local
+		if err := removeClaude(env, false); err == nil {
+			t.Fatal("expected parse error")
+		}
+		if !strings.Contains(stderr.String(), "failed to parse") {
+			t.Error("expected parse error output")
+		}
+	})
+}
+
+func TestClaudeWrappersExit(t *testing.T) {
+	t.Run("install provider error", func(t *testing.T) {
+		cap := stubSetupExit(t)
+		stubClaudeEnvProvider(t, claudeEnv{}, errors.New("boom"))
+		InstallClaude(false, false)
+		if !cap.called || cap.code != 1 {
+			t.Fatal("InstallClaude should exit on provider error")
+		}
+	})
+
+	t.Run("install internal error", func(t *testing.T) {
+		cap := stubSetupExit(t)
+		env, _, _ := newClaudeTestEnv(t)
+		env.ensureDir = func(string, os.FileMode) error { return errors.New("boom") }
+		stubClaudeEnvProvider(t, env, nil)
+		// global=false → project-local (default)
+		InstallClaude(false, false)
+		if !cap.called || cap.code != 1 {
+			t.Fatal("InstallClaude should exit when installClaude fails")
+		}
+	})
+
+	t.Run("check missing hooks", func(t *testing.T) {
+		cap := stubSetupExit(t)
+		env, _, _ := newClaudeTestEnv(t)
+		stubClaudeEnvProvider(t, env, nil)
+		CheckClaude()
+		if !cap.called || cap.code != 1 {
+			t.Fatal("CheckClaude should exit when hooks missing")
+		}
+	})
+
+	t.Run("remove parse error", func(t *testing.T) {
+		cap := stubSetupExit(t)
+		env, _, _ := newClaudeTestEnv(t)
+		// Write invalid JSON to project settings path (default target)
+		path := projectSettingsPath(env.projectDir)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(path, []byte("oops"), 0o644); err != nil {
+			t.Fatalf("write file: %v", err)
+		}
+		stubClaudeEnvProvider(t, env, nil)
+		// global=false → project-local (default)
+		RemoveClaude(false)
+		if !cap.called || cap.code != 1 {
+			t.Fatal("RemoveClaude should exit on parse error")
+		}
+	})
 }

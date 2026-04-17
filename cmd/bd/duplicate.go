@@ -1,12 +1,9 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -49,46 +46,33 @@ var (
 
 func init() {
 	duplicateCmd.Flags().StringVar(&duplicateOf, "of", "", "Canonical issue ID (required)")
-	_ = duplicateCmd.MarkFlagRequired("of")
+	_ = duplicateCmd.MarkFlagRequired("of") // Only fails if flag missing (caught in tests)
+	duplicateCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(duplicateCmd)
 
 	supersedeCmd.Flags().StringVar(&supersededWith, "with", "", "Replacement issue ID (required)")
-	_ = supersedeCmd.MarkFlagRequired("with")
+	_ = supersedeCmd.MarkFlagRequired("with") // Only fails if flag missing (caught in tests)
+	supersedeCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(supersedeCmd)
 }
 
 func runDuplicate(cmd *cobra.Command, args []string) error {
 	CheckReadonly("duplicate")
 
-	ctx := rootCtx
+	ctx := getRootContext()
+	store := getStore()
+	actor := getActor()
 
 	// Resolve partial IDs
 	var duplicateID, canonicalID string
-	if daemonClient != nil {
-		resp1, err := daemonClient.ResolveID(&rpc.ResolveIDArgs{ID: args[0]})
-		if err != nil {
-			return fmt.Errorf("failed to resolve %s: %w", args[0], err)
-		}
-		if err := json.Unmarshal(resp1.Data, &duplicateID); err != nil {
-			return fmt.Errorf("parsing response: %w", err)
-		}
-		resp2, err := daemonClient.ResolveID(&rpc.ResolveIDArgs{ID: duplicateOf})
-		if err != nil {
-			return fmt.Errorf("failed to resolve %s: %w", duplicateOf, err)
-		}
-		if err := json.Unmarshal(resp2.Data, &canonicalID); err != nil {
-			return fmt.Errorf("parsing response: %w", err)
-		}
-	} else {
-		var err error
-		duplicateID, err = utils.ResolvePartialID(ctx, store, args[0])
-		if err != nil {
-			return fmt.Errorf("failed to resolve %s: %w", args[0], err)
-		}
-		canonicalID, err = utils.ResolvePartialID(ctx, store, duplicateOf)
-		if err != nil {
-			return fmt.Errorf("failed to resolve %s: %w", duplicateOf, err)
-		}
+	var err error
+	duplicateID, err = utils.ResolvePartialID(ctx, store, args[0])
+	if err != nil {
+		return fmt.Errorf("failed to resolve %s: %w", args[0], err)
+	}
+	canonicalID, err = utils.ResolvePartialID(ctx, store, duplicateOf)
+	if err != nil {
+		return fmt.Errorf("failed to resolve %s: %w", duplicateOf, err)
 	}
 
 	if duplicateID == canonicalID {
@@ -97,58 +81,43 @@ func runDuplicate(cmd *cobra.Command, args []string) error {
 
 	// Verify canonical issue exists
 	var canonical *types.Issue
-	if daemonClient != nil {
-		resp, err := daemonClient.Show(&rpc.ShowArgs{ID: canonicalID})
-		if err != nil {
-			return fmt.Errorf("canonical issue not found: %s", canonicalID)
-		}
-		if err := json.Unmarshal(resp.Data, &canonical); err != nil {
-			return fmt.Errorf("parsing response: %w", err)
-		}
-	} else {
-		var err error
-		canonical, err = store.GetIssue(ctx, canonicalID)
-		if err != nil || canonical == nil {
-			return fmt.Errorf("canonical issue not found: %s", canonicalID)
-		}
+	canonical, err = store.GetIssue(ctx, canonicalID)
+	if err != nil || canonical == nil {
+		return fmt.Errorf("canonical issue not found: %s", canonicalID)
 	}
 
-	// Update the duplicate issue with duplicate_of and close it
+	// Add a "duplicates" dependency edge (duplicate → canonical)
+	dep := &types.Dependency{
+		IssueID:     duplicateID,
+		DependsOnID: canonicalID,
+		Type:        types.DepDuplicates,
+	}
+	if err := store.AddDependency(ctx, dep, actor); err != nil {
+		return fmt.Errorf("failed to add duplicate link: %w", err)
+	}
+
+	// Close the duplicate issue
 	closedStatus := string(types.StatusClosed)
-	if daemonClient != nil {
-		// Use RPC for daemon mode (bd-fu83)
-		_, err := daemonClient.Update(&rpc.UpdateArgs{
-			ID:          duplicateID,
-			DuplicateOf: &canonicalID,
-			Status:      &closedStatus,
+	updates := map[string]interface{}{
+		"status": closedStatus,
+	}
+	if err := store.UpdateIssue(ctx, duplicateID, updates, actor); err != nil {
+		return fmt.Errorf("failed to close duplicate: %w", err)
+	}
+
+	if isEmbeddedMode() && store != nil {
+		if _, err := store.CommitPending(ctx, actor); err != nil {
+			return fmt.Errorf("failed to commit: %w", err)
+		}
+	}
+
+	if isJSONOutput() {
+		outputJSON(map[string]interface{}{
+			"duplicate": duplicateID,
+			"canonical": canonicalID,
+			"status":    "closed",
 		})
-		if err != nil {
-			return fmt.Errorf("failed to mark as duplicate: %w", err)
-		}
-	} else {
-		updates := map[string]interface{}{
-			"duplicate_of": canonicalID,
-			"status":       closedStatus,
-		}
-		if err := store.UpdateIssue(ctx, duplicateID, updates, actor); err != nil {
-			return fmt.Errorf("failed to mark as duplicate: %w", err)
-		}
-	}
-
-	// Trigger auto-flush
-	if flushManager != nil {
-		flushManager.MarkDirty(false)
-	}
-
-	if jsonOutput {
-		result := map[string]interface{}{
-			"duplicate":  duplicateID,
-			"canonical":  canonicalID,
-			"status":     "closed",
-		}
-		encoder := json.NewEncoder(os.Stdout)
-		encoder.SetIndent("", "  ")
-		return encoder.Encode(result)
+		return nil
 	}
 
 	fmt.Printf("%s Marked %s as duplicate of %s (closed)\n", ui.RenderPass("✓"), duplicateID, canonicalID)
@@ -158,35 +127,20 @@ func runDuplicate(cmd *cobra.Command, args []string) error {
 func runSupersede(cmd *cobra.Command, args []string) error {
 	CheckReadonly("supersede")
 
-	ctx := rootCtx
+	ctx := getRootContext()
+	store := getStore()
+	actor := getActor()
 
 	// Resolve partial IDs
 	var oldID, newID string
-	if daemonClient != nil {
-		resp1, err := daemonClient.ResolveID(&rpc.ResolveIDArgs{ID: args[0]})
-		if err != nil {
-			return fmt.Errorf("failed to resolve %s: %w", args[0], err)
-		}
-		if err := json.Unmarshal(resp1.Data, &oldID); err != nil {
-			return fmt.Errorf("parsing response: %w", err)
-		}
-		resp2, err := daemonClient.ResolveID(&rpc.ResolveIDArgs{ID: supersededWith})
-		if err != nil {
-			return fmt.Errorf("failed to resolve %s: %w", supersededWith, err)
-		}
-		if err := json.Unmarshal(resp2.Data, &newID); err != nil {
-			return fmt.Errorf("parsing response: %w", err)
-		}
-	} else {
-		var err error
-		oldID, err = utils.ResolvePartialID(ctx, store, args[0])
-		if err != nil {
-			return fmt.Errorf("failed to resolve %s: %w", args[0], err)
-		}
-		newID, err = utils.ResolvePartialID(ctx, store, supersededWith)
-		if err != nil {
-			return fmt.Errorf("failed to resolve %s: %w", supersededWith, err)
-		}
+	var err error
+	oldID, err = utils.ResolvePartialID(ctx, store, args[0])
+	if err != nil {
+		return fmt.Errorf("failed to resolve %s: %w", args[0], err)
+	}
+	newID, err = utils.ResolvePartialID(ctx, store, supersededWith)
+	if err != nil {
+		return fmt.Errorf("failed to resolve %s: %w", supersededWith, err)
 	}
 
 	if oldID == newID {
@@ -195,58 +149,43 @@ func runSupersede(cmd *cobra.Command, args []string) error {
 
 	// Verify new issue exists
 	var newIssue *types.Issue
-	if daemonClient != nil {
-		resp, err := daemonClient.Show(&rpc.ShowArgs{ID: newID})
-		if err != nil {
-			return fmt.Errorf("replacement issue not found: %s", newID)
-		}
-		if err := json.Unmarshal(resp.Data, &newIssue); err != nil {
-			return fmt.Errorf("parsing response: %w", err)
-		}
-	} else {
-		var err error
-		newIssue, err = store.GetIssue(ctx, newID)
-		if err != nil || newIssue == nil {
-			return fmt.Errorf("replacement issue not found: %s", newID)
-		}
+	newIssue, err = store.GetIssue(ctx, newID)
+	if err != nil || newIssue == nil {
+		return fmt.Errorf("replacement issue not found: %s", newID)
 	}
 
-	// Update the old issue with superseded_by and close it
+	// Add a "supersedes" dependency edge (old → new)
+	dep := &types.Dependency{
+		IssueID:     oldID,
+		DependsOnID: newID,
+		Type:        types.DepSupersedes,
+	}
+	if err := store.AddDependency(ctx, dep, actor); err != nil {
+		return fmt.Errorf("failed to add supersede link: %w", err)
+	}
+
+	// Close the superseded issue
 	closedStatus := string(types.StatusClosed)
-	if daemonClient != nil {
-		// Use RPC for daemon mode (bd-fu83)
-		_, err := daemonClient.Update(&rpc.UpdateArgs{
-			ID:           oldID,
-			SupersededBy: &newID,
-			Status:       &closedStatus,
+	updates := map[string]interface{}{
+		"status": closedStatus,
+	}
+	if err := store.UpdateIssue(ctx, oldID, updates, actor); err != nil {
+		return fmt.Errorf("failed to close superseded issue: %w", err)
+	}
+
+	if isEmbeddedMode() && store != nil {
+		if _, err := store.CommitPending(ctx, actor); err != nil {
+			return fmt.Errorf("failed to commit: %w", err)
+		}
+	}
+
+	if isJSONOutput() {
+		outputJSON(map[string]interface{}{
+			"superseded":  oldID,
+			"replacement": newID,
+			"status":      "closed",
 		})
-		if err != nil {
-			return fmt.Errorf("failed to mark as superseded: %w", err)
-		}
-	} else {
-		updates := map[string]interface{}{
-			"superseded_by": newID,
-			"status":        closedStatus,
-		}
-		if err := store.UpdateIssue(ctx, oldID, updates, actor); err != nil {
-			return fmt.Errorf("failed to mark as superseded: %w", err)
-		}
-	}
-
-	// Trigger auto-flush
-	if flushManager != nil {
-		flushManager.MarkDirty(false)
-	}
-
-	if jsonOutput {
-		result := map[string]interface{}{
-			"superseded":    oldID,
-			"replacement":   newID,
-			"status":        "closed",
-		}
-		encoder := json.NewEncoder(os.Stdout)
-		encoder.SetIndent("", "  ")
-		return encoder.Encode(result)
+		return nil
 	}
 
 	fmt.Printf("%s Marked %s as superseded by %s (closed)\n", ui.RenderPass("✓"), oldID, newID)

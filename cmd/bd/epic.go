@@ -1,13 +1,13 @@
 package main
+
 import (
-	"encoding/json"
 	"fmt"
-	"os"
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"os"
 )
+
 var epicCmd = &cobra.Command{
 	Use:     "epic",
 	GroupID: "deps",
@@ -21,46 +21,25 @@ var epicStatusCmd = &cobra.Command{
 		// Use global jsonOutput set by PersistentPreRun
 		var epics []*types.EpicStatus
 		var err error
-		if daemonClient != nil {
-			resp, err := daemonClient.EpicStatus(&rpc.EpicStatusArgs{
-				EligibleOnly: eligibleOnly,
-			})
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error communicating with daemon: %v\n", err)
-				os.Exit(1)
-			}
-			if !resp.Success {
-				fmt.Fprintf(os.Stderr, "Error getting epic status: %s\n", resp.Error)
-				os.Exit(1)
-			}
-			if err := json.Unmarshal(resp.Data, &epics); err != nil {
-				fmt.Fprintf(os.Stderr, "Error parsing response: %v\n", err)
-				os.Exit(1)
-			}
-		} else {
-			ctx := rootCtx
-			epics, err = store.GetEpicsEligibleForClosure(ctx)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error getting epic status: %v\n", err)
-				os.Exit(1)
-			}
-			if eligibleOnly {
-				filtered := []*types.EpicStatus{}
-				for _, epic := range epics {
-					if epic.EligibleForClose {
-						filtered = append(filtered, epic)
-					}
+		ctx := rootCtx
+		epics, err = store.GetEpicsEligibleForClosure(ctx)
+		if err != nil {
+			FatalErrorRespectJSON("getting epic status: %v", err)
+		}
+		if eligibleOnly {
+			filtered := []*types.EpicStatus{}
+			for _, epic := range epics {
+				if epic.EligibleForClose {
+					filtered = append(filtered, epic)
 				}
-				epics = filtered
 			}
+			epics = filtered
 		}
 		if jsonOutput {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			if err := enc.Encode(epics); err != nil {
-				fmt.Fprintf(os.Stderr, "Error encoding JSON: %v\n", err)
-				os.Exit(1)
+			if epics == nil {
+				epics = []*types.EpicStatus{}
 			}
+			outputJSON(epics)
 			return
 		}
 		// Human-readable output
@@ -103,51 +82,27 @@ var closeEligibleEpicsCmd = &cobra.Command{
 		}
 		// Use global jsonOutput set by PersistentPreRun
 		var eligibleEpics []*types.EpicStatus
-		if daemonClient != nil {
-			resp, err := daemonClient.EpicStatus(&rpc.EpicStatusArgs{
-				EligibleOnly: true,
-			})
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error communicating with daemon: %v\n", err)
-				os.Exit(1)
-			}
-			if !resp.Success {
-				fmt.Fprintf(os.Stderr, "Error getting eligible epics: %s\n", resp.Error)
-				os.Exit(1)
-			}
-			if err := json.Unmarshal(resp.Data, &eligibleEpics); err != nil {
-				fmt.Fprintf(os.Stderr, "Error parsing response: %v\n", err)
-				os.Exit(1)
-			}
-		} else {
-			ctx := rootCtx
-			epics, err := store.GetEpicsEligibleForClosure(ctx)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error getting eligible epics: %v\n", err)
-				os.Exit(1)
-			}
-			for _, epic := range epics {
-				if epic.EligibleForClose {
-					eligibleEpics = append(eligibleEpics, epic)
-				}
+		ctx := rootCtx
+		epics, err := store.GetEpicsEligibleForClosure(ctx)
+		if err != nil {
+			FatalErrorRespectJSON("getting eligible epics: %v", err)
+		}
+		for _, epic := range epics {
+			if epic.EligibleForClose {
+				eligibleEpics = append(eligibleEpics, epic)
 			}
 		}
 		if len(eligibleEpics) == 0 {
-			if !jsonOutput {
-				fmt.Println("No epics eligible for closure")
+			if jsonOutput {
+				outputJSON([]*types.EpicStatus{})
 			} else {
-				fmt.Println("[]")
+				fmt.Println("No epics eligible for closure")
 			}
 			return
 		}
 		if dryRun {
 			if jsonOutput {
-				enc := json.NewEncoder(os.Stdout)
-				enc.SetIndent("", "  ")
-				if err := enc.Encode(eligibleEpics); err != nil {
-					fmt.Fprintf(os.Stderr, "Error encoding JSON: %v\n", err)
-					os.Exit(1)
-				}
+				outputJSON(eligibleEpics)
 			} else {
 				fmt.Printf("Would close %d epic(s):\n", len(eligibleEpics))
 				for _, epicStatus := range eligibleEpics {
@@ -159,41 +114,23 @@ var closeEligibleEpicsCmd = &cobra.Command{
 		// Actually close the epics
 		closedIDs := []string{}
 		for _, epicStatus := range eligibleEpics {
-			if daemonClient != nil {
-				resp, err := daemonClient.CloseIssue(&rpc.CloseArgs{
-					ID:     epicStatus.Epic.ID,
-					Reason: "All children completed",
-				})
-				if err != nil || !resp.Success {
-					errMsg := ""
-					if err != nil {
-						errMsg = err.Error()
-					} else if !resp.Success {
-						errMsg = resp.Error
-					}
-					fmt.Fprintf(os.Stderr, "Error closing %s: %s\n", epicStatus.Epic.ID, errMsg)
-					continue
-				}
-			} else {
-				ctx := rootCtx
-				err := store.CloseIssue(ctx, epicStatus.Epic.ID, "All children completed", "system")
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", epicStatus.Epic.ID, err)
-					continue
-				}
+			err := store.CloseIssue(ctx, epicStatus.Epic.ID, "All children completed", "system", "")
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", epicStatus.Epic.ID, err)
+				continue
 			}
 			closedIDs = append(closedIDs, epicStatus.Epic.ID)
 		}
+		if isEmbeddedMode() && len(closedIDs) > 0 && store != nil {
+			if _, err := store.CommitPending(ctx, actor); err != nil {
+				FatalErrorRespectJSON("failed to commit: %v", err)
+			}
+		}
 		if jsonOutput {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			if err := enc.Encode(map[string]interface{}{
+			outputJSON(map[string]interface{}{
 				"closed": closedIDs,
 				"count":  len(closedIDs),
-			}); err != nil {
-				fmt.Fprintf(os.Stderr, "Error encoding JSON: %v\n", err)
-				os.Exit(1)
-			}
+			})
 		} else {
 			fmt.Printf("✓ Closed %d epic(s)\n", len(closedIDs))
 			for _, id := range closedIDs {
@@ -202,6 +139,7 @@ var closeEligibleEpicsCmd = &cobra.Command{
 		}
 	},
 }
+
 func init() {
 	epicCmd.AddCommand(epicStatusCmd)
 	epicCmd.AddCommand(closeEligibleEpicsCmd)

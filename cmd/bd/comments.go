@@ -1,15 +1,13 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
-	"os/user"
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 )
 
@@ -33,59 +31,31 @@ Examples:
   bd comments add bd-123 -f notes.txt`,
 	Args: cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
+		localTime, _ := cmd.Flags().GetBool("local-time")
 		issueID := args[0]
 
-		var comments []*types.Comment
-		usedDaemon := false
-		if daemonClient != nil {
-			resp, err := daemonClient.ListComments(&rpc.CommentListArgs{ID: issueID})
-			if err != nil {
-				if isUnknownOperationError(err) {
-					if err := fallbackToDirectMode("daemon does not support comment_list RPC"); err != nil {
-						fmt.Fprintf(os.Stderr, "Error getting comments: %v\n", err)
-						os.Exit(1)
-					}
-				} else {
-					fmt.Fprintf(os.Stderr, "Error getting comments: %v\n", err)
-					os.Exit(1)
-				}
-			} else {
-				if err := json.Unmarshal(resp.Data, &comments); err != nil {
-					fmt.Fprintf(os.Stderr, "Error decoding comments: %v\n", err)
-					os.Exit(1)
-				}
-				usedDaemon = true
-			}
+		if err := ensureStoreActive(); err != nil {
+			FatalErrorRespectJSON("getting comments: %v", err)
+		}
+		ctx := rootCtx
+		fullID, err := utils.ResolvePartialID(ctx, store, issueID)
+		if err != nil {
+			FatalErrorRespectJSON("resolving %s: %v", issueID, err)
+		}
+		issueID = fullID
+
+		comments, err := store.GetIssueComments(ctx, issueID)
+		if err != nil {
+			FatalErrorRespectJSON("getting comments: %v", err)
 		}
 
-		if !usedDaemon {
-			if err := ensureStoreActive(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error getting comments: %v\n", err)
-				os.Exit(1)
-			}
-			ctx := rootCtx
-			fullID, err := utils.ResolvePartialID(ctx, store, issueID)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", issueID, err)
-				os.Exit(1)
-			}
-			issueID = fullID
-			
-			result, err := store.GetIssueComments(ctx, issueID)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error getting comments: %v\n", err)
-				os.Exit(1)
-			}
-			comments = result
+		// Normalize nil to empty slice for consistent JSON output
+		if comments == nil {
+			comments = make([]*types.Comment, 0)
 		}
 
 		if jsonOutput {
-			data, err := json.MarshalIndent(comments, "", "  ")
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error encoding JSON: %v\n", err)
-				os.Exit(1)
-			}
-			fmt.Println(string(data))
+			outputJSON(comments)
 			return
 		}
 
@@ -97,7 +67,16 @@ Examples:
 
 		fmt.Printf("\nComments on %s:\n\n", issueID)
 		for _, comment := range comments {
-			fmt.Printf("[%s] %s at %s\n", comment.Author, comment.Text, comment.CreatedAt.Format("2006-01-02 15:04"))
+			ts := comment.CreatedAt
+			if localTime {
+				ts = ts.Local()
+			}
+			fmt.Printf("[%s] at %s\n", comment.Author, ts.Format("2006-01-02 15:04"))
+			rendered := ui.RenderMarkdown(comment.Text)
+			// TrimRight removes trailing newlines that Glamour adds, preventing extra blank lines
+			for _, line := range strings.Split(strings.TrimRight(rendered, "\n"), "\n") {
+				fmt.Printf("  %s\n", line)
+			}
 			fmt.Println()
 		}
 	},
@@ -125,88 +104,50 @@ Examples:
 			// Read from file
 			data, err := os.ReadFile(commentText) // #nosec G304 - user-provided file path is intentional
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error reading file: %v\n", err)
-				os.Exit(1)
+				FatalErrorRespectJSON("reading file: %v", err)
 			}
 			commentText = string(data)
 		} else if len(args) < 2 {
-			fmt.Fprintf(os.Stderr, "Error: comment text required (use -f to read from file)\n")
-			os.Exit(1)
+			FatalErrorRespectJSON("comment text required (use -f to read from file)")
 		} else {
 			commentText = args[1]
 		}
 
-		// Get author from author flag, BD_ACTOR var, or system USER var
+		if strings.TrimSpace(commentText) == "" {
+			FatalErrorRespectJSON("comment text cannot be empty")
+		}
+
+		// Get author from author flag, or use git-aware default
 		author, _ := cmd.Flags().GetString("author")
 		if author == "" {
-			author = os.Getenv("BD_ACTOR")
-			if author == "" {
-				author = os.Getenv("USER")
-			}
-			if author == "" {
-				if u, err := user.Current(); err == nil {
-					author = u.Username
-				} else {
-					author = "unknown"
-				}
-			}
+			author = getActorWithGit()
 		}
 
-		var comment *types.Comment
-		if daemonClient != nil {
-			resp, err := daemonClient.AddComment(&rpc.CommentAddArgs{
-				ID:     issueID,
-				Author: author,
-				Text:   commentText,
-			})
-			if err != nil {
-				if isUnknownOperationError(err) {
-					if err := fallbackToDirectMode("daemon does not support comment_add RPC"); err != nil {
-						fmt.Fprintf(os.Stderr, "Error adding comment: %v\n", err)
-						os.Exit(1)
-					}
-				} else {
-					fmt.Fprintf(os.Stderr, "Error adding comment: %v\n", err)
-					os.Exit(1)
-				}
-			} else {
-				var parsed types.Comment
-				if err := json.Unmarshal(resp.Data, &parsed); err != nil {
-					fmt.Fprintf(os.Stderr, "Error decoding comment: %v\n", err)
-					os.Exit(1)
-				}
-				comment = &parsed
-			}
+		if err := ensureStoreActive(); err != nil {
+			FatalErrorRespectJSON("adding comment: %v", err)
+		}
+		ctx := rootCtx
+
+		fullID, err := utils.ResolvePartialID(ctx, store, issueID)
+		if err != nil {
+			FatalErrorRespectJSON("resolving %s: %v", issueID, err)
+		}
+		issueID = fullID
+
+		comment, err := store.AddIssueComment(ctx, issueID, author, commentText)
+		if err != nil {
+			FatalErrorRespectJSON("adding comment: %v", err)
 		}
 
-		if comment == nil {
-			if err := ensureStoreActive(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error adding comment: %v\n", err)
-				os.Exit(1)
-			}
-			ctx := rootCtx
-			
-			fullID, err := utils.ResolvePartialID(ctx, store, issueID)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", issueID, err)
-				os.Exit(1)
-			}
-			issueID = fullID
-			
-			comment, err = store.AddIssueComment(ctx, issueID, author, commentText)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error adding comment: %v\n", err)
-				os.Exit(1)
+		// Embedded mode: flush Dolt commit.
+		if isEmbeddedMode() {
+			if _, err := store.CommitPending(ctx, author); err != nil {
+				FatalErrorRespectJSON("failed to commit: %v", err)
 			}
 		}
 
 		if jsonOutput {
-			data, err := json.MarshalIndent(comment, "", "  ")
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error encoding JSON: %v\n", err)
-				os.Exit(1)
-			}
-			fmt.Println(string(data))
+			outputJSON(comment)
 			return
 		}
 
@@ -214,34 +155,17 @@ Examples:
 	},
 }
 
-// commentCmd is a top-level alias for commentsAddCmd
-var commentCmd = &cobra.Command{
-	Use:     "comment [issue-id] [text]",
-	GroupID: "issues",
-	Short:   "Add a comment to an issue (alias for 'comments add')",
-	Long: `Add a comment to an issue. This is a convenient alias for 'bd comments add'.
-
-Examples:
-  # Add a comment
-  bd comment bd-123 "Working on this now"
-
-  # Add a comment from a file
-  bd comment bd-123 -f notes.txt`,
-	Args: cobra.MinimumNArgs(1),
-	Run: commentsAddCmd.Run,
-}
-
 func init() {
 	commentsCmd.AddCommand(commentsAddCmd)
+	commentsCmd.Flags().Bool("local-time", false, "Show timestamps in local time instead of UTC")
 	commentsAddCmd.Flags().StringP("file", "f", "", "Read comment text from file")
 	commentsAddCmd.Flags().StringP("author", "a", "", "Add author to comment")
-	
-	// Add the same flags to the alias
-	commentCmd.Flags().StringP("file", "f", "", "Read comment text from file")
-	commentCmd.Flags().StringP("author", "a", "", "Add author to comment")
-	
+
+	// Issue ID completions
+	commentsCmd.ValidArgsFunction = issueIDCompletion
+	commentsAddCmd.ValidArgsFunction = issueIDCompletion
+
 	rootCmd.AddCommand(commentsCmd)
-	rootCmd.AddCommand(commentCmd)
 }
 
 func isUnknownOperationError(err error) bool {

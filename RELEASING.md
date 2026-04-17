@@ -38,7 +38,6 @@ A beads release involves multiple distribution channels:
 ### Required Access
 
 - GitHub: Write access to repository and ability to create releases
-- Homebrew: Write access to steveyegge/homebrew-beads
 - PyPI: Maintainer access to `beads-mcp` package
 - npm: Member of `@beads` organization
 
@@ -68,7 +67,10 @@ Before starting a release:
 
 - [ ] All tests passing (`go test ./...`)
 - [ ] npm package tests passing (`cd npm-package && npm run test:all`)
+- [ ] **Upgrade smoke tests pass** (`make test-upgrade`) — see [Release Stability Gate](docs/RELEASE-STABILITY-GATE.md)
+- [ ] **Regression tests pass** (`make test-regression`)
 - [ ] **CHANGELOG.md updated with release notes** (see format below)
+- [ ] **Breaking changes documented** with migration steps and recovery instructions
 - [ ] No uncommitted changes
 - [ ] On `main` branch and up to date with origin
 
@@ -127,14 +129,14 @@ Use the version bump script to update all version references and create the rele
 | `--install` | Build and install bd to `~/go/bin` AND `~/.local/bin` |
 | `--mcp-local` | Install beads-mcp from local source via uv/pip |
 | `--upgrade-mcp` | Upgrade beads-mcp from PyPI (after PyPI publish) |
-| `--restart-daemons` | Restart all bd daemons to pick up new version |
-| `--all` | Shorthand for `--install --mcp-local --restart-daemons` |
+| `--restart-servers` | Restart all Dolt servers to pick up new version |
+| `--all` | Shorthand for `--install --mcp-local --restart-servers` |
 
 This updates:
 - `cmd/bd/version.go` - CLI version constant
 - `integrations/beads-mcp/pyproject.toml` - MCP server version
 - `integrations/beads-mcp/src/beads_mcp/__init__.py` - MCP Python version
-- `.claude-plugin/plugin.json` - Plugin version
+- `claude-plugin/.claude-plugin/plugin.json` - Plugin version
 - `.claude-plugin/marketplace.json` - Marketplace version
 - `npm-package/package.json` - npm package version
 - `cmd/bd/templates/hooks/*` - Git hook versions
@@ -231,46 +233,18 @@ gh release create v0.22.0 \
 
 ## 3. Homebrew Update
 
-Homebrew formula is in a separate tap repository.
-
-### Automatic Update (If Configured)
-
-If you have goreleaser configured with Homebrew:
-
-```bash
-# Already done by goreleaser
-# Check Formula/bd.rb was updated automatically
-```
-
-### Manual Update
-
-```bash
-# Clone tap repository
-git clone https://github.com/steveyegge/homebrew-beads.git
-cd homebrew-beads
-
-# Update formula
-# 1. Update version number
-# 2. Update SHA256 checksums for macOS binaries
-
-# Test formula
-brew install --build-from-source ./Formula/bd.rb
-bd version  # Should show 0.22.0
-
-# Commit and push
-git add Formula/bd.rb
-git commit -m "Update bd to 0.22.0"
-git push
-```
+Homebrew formula is now in homebrew-core. Updates are handled automatically via GitHub Release artifacts.
 
 ### Verify Homebrew
 
+After the GitHub Release is published, verify the Homebrew package:
+
 ```bash
-# Update tap
+# Update Homebrew
 brew update
 
-# Install new version
-brew upgrade bd
+# Install/upgrade
+brew upgrade beads  # or: brew install beads
 
 # Verify
 bd version  # Should show 0.22.0
@@ -338,11 +312,11 @@ Update the Claude Code marketplace metadata files:
 # Change version to match current release
 vim .claude-plugin/marketplace.json
 
-# Update .claude-plugin/plugin.json if needed
-vim .claude-plugin/plugin.json
+# Update claude-plugin/.claude-plugin/plugin.json if needed
+vim claude-plugin/.claude-plugin/plugin.json
 
 # Commit changes
-git add .claude-plugin/
+git add .claude-plugin/ claude-plugin/.claude-plugin/
 git commit -m "chore: Update Claude Code marketplace to v0.22.0"
 ```
 
@@ -451,7 +425,7 @@ tar -xzf beads_0.22.0_darwin_arm64.tar.gz
 
 ```bash
 brew update
-brew upgrade bd
+brew upgrade beads
 bd version
 ```
 
@@ -519,21 +493,13 @@ gh release edit v0.22.0 --prerelease
 
 Follow hotfix procedure above to release 0.22.1.
 
-### 3. Revert Homebrew (If Needed)
-
-```bash
-cd homebrew-beads
-git revert HEAD
-git push
-```
-
-### 4. Deprecate npm Package (If Needed)
+### 3. Deprecate npm Package (If Needed)
 
 ```bash
 npm deprecate @beads/bd@0.22.0 "Critical bug, please upgrade to 0.22.1"
 ```
 
-### 5. Yank PyPI Release (If Needed)
+### 4. Yank PyPI Release (If Needed)
 
 ```bash
 # Can't delete, but can yank (hide from pip install)
@@ -623,10 +589,10 @@ After a successful release:
    ./scripts/bump-version.sh 0.24.3 --commit --install --upgrade-mcp
    ```
 
-2. **Restart local daemons** to pick up the new version:
+2. **Verify the upgraded CLI**:
    ```bash
-   bd daemons killall --json
-   # Daemons will auto-restart with new version on next bd command
+   bd version
+   bd doctor quick
    ```
 
 3. **Announce** on relevant channels (Twitter, blog, etc.)

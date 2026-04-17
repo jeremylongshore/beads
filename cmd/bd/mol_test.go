@@ -1,3 +1,5 @@
+//go:build cgo
+
 package main
 
 import (
@@ -5,7 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/sqlite"
+	"github.com/steveyegge/beads/internal/formula"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -213,9 +216,9 @@ func TestMinPriority(t *testing.T) {
 func TestBondProtoProto(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	store, err := sqlite.New(ctx, dbPath)
+	store, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
 	if err != nil {
-		t.Fatalf("Failed to create store: %v", err)
+		t.Skipf("skipping: Dolt server not available: %v", err)
 	}
 	defer store.Close()
 	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
@@ -289,9 +292,9 @@ func TestBondProtoProto(t *testing.T) {
 func TestBondProtoMol(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	store, err := sqlite.New(ctx, dbPath)
+	store, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
 	if err != nil {
-		t.Fatalf("Failed to create store: %v", err)
+		t.Skipf("skipping: Dolt server not available: %v", err)
 	}
 	defer store.Close()
 	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
@@ -343,7 +346,7 @@ func TestBondProtoMol(t *testing.T) {
 
 	// Bond proto to molecule
 	vars := map[string]string{"name": "auth-feature"}
-	result, err := bondProtoMol(ctx, store, proto, mol, types.BondTypeSequential, vars, "test")
+	result, err := bondProtoMol(ctx, store, proto, mol, types.BondTypeSequential, vars, "", "test", false, false)
 	if err != nil {
 		t.Fatalf("bondProtoMol failed: %v", err)
 	}
@@ -362,9 +365,9 @@ func TestBondProtoMol(t *testing.T) {
 func TestBondMolMol(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	store, err := sqlite.New(ctx, dbPath)
+	store, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
 	if err != nil {
-		t.Fatalf("Failed to create store: %v", err)
+		t.Skipf("skipping: Dolt server not available: %v", err)
 	}
 	defer store.Close()
 	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
@@ -462,9 +465,9 @@ func TestBondMolMol(t *testing.T) {
 func TestSquashMolecule(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	s, err := sqlite.New(ctx, dbPath)
+	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
 	if err != nil {
-		t.Fatalf("Failed to create store: %v", err)
+		t.Skipf("skipping: Dolt server not available: %v", err)
 	}
 	defer s.Close()
 	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
@@ -489,7 +492,7 @@ func TestSquashMolecule(t *testing.T) {
 		Status:      types.StatusClosed,
 		Priority:    2,
 		IssueType:   types.TypeTask,
-		Wisp:        true,
+		Ephemeral:   true,
 		CloseReason: "Completed design",
 	}
 	child2 := &types.Issue{
@@ -498,7 +501,7 @@ func TestSquashMolecule(t *testing.T) {
 		Status:      types.StatusClosed,
 		Priority:    2,
 		IssueType:   types.TypeTask,
-		Wisp:        true,
+		Ephemeral:   true,
 		CloseReason: "Code merged",
 	}
 
@@ -547,7 +550,7 @@ func TestSquashMolecule(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to get digest: %v", err)
 	}
-	if digest.Wisp {
+	if digest.Ephemeral {
 		t.Error("Digest should NOT be ephemeral")
 	}
 	if digest.Status != types.StatusClosed {
@@ -570,9 +573,9 @@ func TestSquashMolecule(t *testing.T) {
 func TestSquashMoleculeWithDelete(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	s, err := sqlite.New(ctx, dbPath)
+	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
 	if err != nil {
-		t.Fatalf("Failed to create store: %v", err)
+		t.Skipf("skipping: Dolt server not available: %v", err)
 	}
 	defer s.Close()
 	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
@@ -595,7 +598,7 @@ func TestSquashMoleculeWithDelete(t *testing.T) {
 		Status:    types.StatusClosed,
 		Priority:  2,
 		IssueType: types.TypeTask,
-		Wisp:      true,
+		Ephemeral: true,
 	}
 	if err := s.CreateIssue(ctx, child, "test"); err != nil {
 		t.Fatalf("Failed to create child: %v", err)
@@ -679,9 +682,9 @@ func TestGenerateDigest(t *testing.T) {
 func TestSquashMoleculeWithAgentSummary(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	s, err := sqlite.New(ctx, dbPath)
+	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
 	if err != nil {
-		t.Fatalf("Failed to create store: %v", err)
+		t.Skipf("skipping: Dolt server not available: %v", err)
 	}
 	defer s.Close()
 	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
@@ -705,7 +708,7 @@ func TestSquashMoleculeWithAgentSummary(t *testing.T) {
 		Status:      types.StatusClosed,
 		Priority:    2,
 		IssueType:   types.TypeTask,
-		Wisp:        true,
+		Ephemeral:   true,
 		CloseReason: "Done",
 	}
 	if err := s.CreateIssue(ctx, child, "test"); err != nil {
@@ -750,9 +753,9 @@ func TestSquashMoleculeWithAgentSummary(t *testing.T) {
 func TestSpawnWithBasicAttach(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	s, err := sqlite.New(ctx, dbPath)
+	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
 	if err != nil {
-		t.Fatalf("Failed to create store: %v", err)
+		t.Skipf("skipping: Dolt server not available: %v", err)
 	}
 	defer s.Close()
 	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
@@ -824,7 +827,7 @@ func TestSpawnWithBasicAttach(t *testing.T) {
 	}
 
 	vars := map[string]string{"feature": "auth"}
-	spawnResult, err := spawnMolecule(ctx, s, primarySubgraph, vars, "", "test", true)
+	spawnResult, err := spawnMolecule(ctx, s, primarySubgraph, vars, "", "test", true, "")
 	if err != nil {
 		t.Fatalf("Failed to spawn primary: %v", err)
 	}
@@ -840,7 +843,7 @@ func TestSpawnWithBasicAttach(t *testing.T) {
 	}
 
 	// Attach the second proto (simulating --attach flag behavior)
-	bondResult, err := bondProtoMol(ctx, s, attachProto, spawnedMol, types.BondTypeSequential, vars, "test")
+	bondResult, err := bondProtoMol(ctx, s, attachProto, spawnedMol, types.BondTypeSequential, vars, "", "test", false, false)
 	if err != nil {
 		t.Fatalf("Failed to bond attachment: %v", err)
 	}
@@ -883,9 +886,9 @@ func TestSpawnWithBasicAttach(t *testing.T) {
 func TestSpawnWithMultipleAttachments(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	s, err := sqlite.New(ctx, dbPath)
+	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
 	if err != nil {
-		t.Fatalf("Failed to create store: %v", err)
+		t.Skipf("skipping: Dolt server not available: %v", err)
 	}
 	defer s.Close()
 	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
@@ -934,7 +937,7 @@ func TestSpawnWithMultipleAttachments(t *testing.T) {
 		t.Fatalf("Failed to load primary subgraph: %v", err)
 	}
 
-	spawnResult, err := spawnMolecule(ctx, s, primarySubgraph, nil, "", "test", true)
+	spawnResult, err := spawnMolecule(ctx, s, primarySubgraph, nil, "", "test", true, "")
 	if err != nil {
 		t.Fatalf("Failed to spawn primary: %v", err)
 	}
@@ -945,12 +948,12 @@ func TestSpawnWithMultipleAttachments(t *testing.T) {
 	}
 
 	// Attach both protos (simulating --attach A --attach B)
-	bondResultA, err := bondProtoMol(ctx, s, attachA, spawnedMol, types.BondTypeSequential, nil, "test")
+	bondResultA, err := bondProtoMol(ctx, s, attachA, spawnedMol, types.BondTypeSequential, nil, "", "test", false, false)
 	if err != nil {
 		t.Fatalf("Failed to bond attachA: %v", err)
 	}
 
-	bondResultB, err := bondProtoMol(ctx, s, attachB, spawnedMol, types.BondTypeSequential, nil, "test")
+	bondResultB, err := bondProtoMol(ctx, s, attachB, spawnedMol, types.BondTypeSequential, nil, "", "test", false, false)
 	if err != nil {
 		t.Fatalf("Failed to bond attachB: %v", err)
 	}
@@ -1001,9 +1004,9 @@ func TestSpawnWithMultipleAttachments(t *testing.T) {
 func TestSpawnAttachTypes(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	s, err := sqlite.New(ctx, dbPath)
+	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
 	if err != nil {
-		t.Fatalf("Failed to create store: %v", err)
+		t.Skipf("skipping: Dolt server not available: %v", err)
 	}
 	defer s.Close()
 	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
@@ -1041,6 +1044,7 @@ func TestSpawnAttachTypes(t *testing.T) {
 	}{
 		{"sequential uses blocks", types.BondTypeSequential, types.DepBlocks},
 		{"parallel uses parent-child", types.BondTypeParallel, types.DepParentChild},
+		{"conditional uses conditional-blocks", types.BondTypeConditional, types.DepConditionalBlocks},
 	}
 
 	for _, tt := range tests {
@@ -1051,7 +1055,7 @@ func TestSpawnAttachTypes(t *testing.T) {
 				t.Fatalf("Failed to load primary subgraph: %v", err)
 			}
 
-			spawnResult, err := spawnMolecule(ctx, s, primarySubgraph, nil, "", "test", true)
+			spawnResult, err := spawnMolecule(ctx, s, primarySubgraph, nil, "", "test", true, "")
 			if err != nil {
 				t.Fatalf("Failed to spawn primary: %v", err)
 			}
@@ -1062,7 +1066,7 @@ func TestSpawnAttachTypes(t *testing.T) {
 			}
 
 			// Bond with specified type
-			bondResult, err := bondProtoMol(ctx, s, attachProto, spawnedMol, tt.bondType, nil, "test")
+			bondResult, err := bondProtoMol(ctx, s, attachProto, spawnedMol, tt.bondType, nil, "", "test", false, false)
 			if err != nil {
 				t.Fatalf("Failed to bond: %v", err)
 			}
@@ -1120,9 +1124,9 @@ func TestSpawnAttachNonProtoError(t *testing.T) {
 func TestSpawnVariableAggregation(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	s, err := sqlite.New(ctx, dbPath)
+	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
 	if err != nil {
-		t.Fatalf("Failed to create store: %v", err)
+		t.Skipf("skipping: Dolt server not available: %v", err)
 	}
 	defer s.Close()
 	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
@@ -1211,7 +1215,7 @@ func TestSpawnVariableAggregation(t *testing.T) {
 	}
 
 	// Spawn primary with variables
-	spawnResult, err := spawnMolecule(ctx, s, primarySubgraph, vars, "", "test", true)
+	spawnResult, err := spawnMolecule(ctx, s, primarySubgraph, vars, "", "test", true, "")
 	if err != nil {
 		t.Fatalf("Failed to spawn primary: %v", err)
 	}
@@ -1227,7 +1231,7 @@ func TestSpawnVariableAggregation(t *testing.T) {
 
 	// Bond attachment with same variables
 	spawnedMol, _ := s.GetIssue(ctx, spawnResult.NewEpicID)
-	bondResult, err := bondProtoMol(ctx, s, attachProto, spawnedMol, types.BondTypeSequential, vars, "test")
+	bondResult, err := bondProtoMol(ctx, s, attachProto, spawnedMol, types.BondTypeSequential, vars, "", "test", false, false)
 	if err != nil {
 		t.Fatalf("Failed to bond: %v", err)
 	}
@@ -1282,297 +1286,15 @@ func TestSpawnAttachDryRunOutput(t *testing.T) {
 	}
 }
 
-// TestSquashWispToPermanent tests cross-store squash: wisp → permanent digest (bd-kwjh.4)
-func TestSquashWispToPermanent(t *testing.T) {
-	ctx := context.Background()
-
-	// Create separate wisp and permanent stores
-	wispPath := t.TempDir() + "/wisp.db"
-	permPath := t.TempDir() + "/permanent.db"
-
-	wispStore, err := sqlite.New(ctx, wispPath)
-	if err != nil {
-		t.Fatalf("Failed to create wisp store: %v", err)
-	}
-	defer wispStore.Close()
-	if err := wispStore.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set wisp config: %v", err)
-	}
-
-	permStore, err := sqlite.New(ctx, permPath)
-	if err != nil {
-		t.Fatalf("Failed to create permanent store: %v", err)
-	}
-	defer permStore.Close()
-	if err := permStore.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set permanent config: %v", err)
-	}
-
-	// Create a wisp molecule in wisp storage
-	wispRoot := &types.Issue{
-		Title:     "Deacon Patrol Cycle",
-		Status:    types.StatusOpen,
-		Priority:  1,
-		IssueType: types.TypeEpic,
-		Wisp:      true,
-	}
-	if err := wispStore.CreateIssue(ctx, wispRoot, "test"); err != nil {
-		t.Fatalf("Failed to create wisp root: %v", err)
-	}
-
-	wispChild1 := &types.Issue{
-		Title:       "Check witnesses",
-		Description: "Verified 3 witnesses healthy",
-		Status:      types.StatusClosed,
-		Priority:    2,
-		IssueType:   types.TypeTask,
-		Wisp:        true,
-		CloseReason: "All healthy",
-	}
-	wispChild2 := &types.Issue{
-		Title:       "Process mail queue",
-		Description: "Processed 5 mail items",
-		Status:      types.StatusClosed,
-		Priority:    2,
-		IssueType:   types.TypeTask,
-		Wisp:        true,
-		CloseReason: "Mail delivered",
-	}
-
-	if err := wispStore.CreateIssue(ctx, wispChild1, "test"); err != nil {
-		t.Fatalf("Failed to create wisp child1: %v", err)
-	}
-	if err := wispStore.CreateIssue(ctx, wispChild2, "test"); err != nil {
-		t.Fatalf("Failed to create wisp child2: %v", err)
-	}
-
-	// Add parent-child dependencies
-	if err := wispStore.AddDependency(ctx, &types.Dependency{
-		IssueID:     wispChild1.ID,
-		DependsOnID: wispRoot.ID,
-		Type:        types.DepParentChild,
-	}, "test"); err != nil {
-		t.Fatalf("Failed to add child1 dependency: %v", err)
-	}
-	if err := wispStore.AddDependency(ctx, &types.Dependency{
-		IssueID:     wispChild2.ID,
-		DependsOnID: wispRoot.ID,
-		Type:        types.DepParentChild,
-	}, "test"); err != nil {
-		t.Fatalf("Failed to add child2 dependency: %v", err)
-	}
-
-	// Load the subgraph
-	subgraph, err := loadTemplateSubgraph(ctx, wispStore, wispRoot.ID)
-	if err != nil {
-		t.Fatalf("Failed to load wisp subgraph: %v", err)
-	}
-
-	// Verify subgraph loaded correctly
-	if len(subgraph.Issues) != 3 {
-		t.Fatalf("Expected 3 issues in subgraph, got %d", len(subgraph.Issues))
-	}
-
-	// Perform cross-store squash
-	result, err := squashWispToPermanent(ctx, wispStore, permStore, subgraph, false, "", "test")
-	if err != nil {
-		t.Fatalf("squashWispToPermanent failed: %v", err)
-	}
-
-	// Verify result
-	if result.SquashedCount != 3 {
-		t.Errorf("SquashedCount = %d, want 3", result.SquashedCount)
-	}
-	if !result.WispSquash {
-		t.Error("WispSquash should be true")
-	}
-	if result.DigestID == "" {
-		t.Error("DigestID should not be empty")
-	}
-	if result.DeletedCount != 3 {
-		t.Errorf("DeletedCount = %d, want 3", result.DeletedCount)
-	}
-
-	// Verify digest was created in permanent storage
-	digest, err := permStore.GetIssue(ctx, result.DigestID)
-	if err != nil {
-		t.Fatalf("Failed to get digest from permanent store: %v", err)
-	}
-	if digest.Wisp {
-		t.Error("Digest should NOT be a wisp")
-	}
-	if digest.Status != types.StatusClosed {
-		t.Errorf("Digest status = %v, want closed", digest.Status)
-	}
-	if !strings.Contains(digest.Title, "Deacon Patrol Cycle") {
-		t.Errorf("Digest title %q should contain original molecule title", digest.Title)
-	}
-	if !strings.Contains(digest.Description, "Check witnesses") {
-		t.Error("Digest description should contain child titles")
-	}
-
-	// Verify wisps were deleted from wisp storage
-	// Note: GetIssue returns (nil, nil) when issue doesn't exist
-	rootIssue, err := wispStore.GetIssue(ctx, wispRoot.ID)
-	if err != nil {
-		t.Errorf("Unexpected error checking root deletion: %v", err)
-	}
-	if rootIssue != nil {
-		t.Error("Wisp root should have been deleted")
-	}
-	child1Issue, err := wispStore.GetIssue(ctx, wispChild1.ID)
-	if err != nil {
-		t.Errorf("Unexpected error checking child1 deletion: %v", err)
-	}
-	if child1Issue != nil {
-		t.Error("Wisp child1 should have been deleted")
-	}
-	child2Issue, err := wispStore.GetIssue(ctx, wispChild2.ID)
-	if err != nil {
-		t.Errorf("Unexpected error checking child2 deletion: %v", err)
-	}
-	if child2Issue != nil {
-		t.Error("Wisp child2 should have been deleted")
-	}
-}
-
-// TestSquashWispToPermanentWithSummary tests that agent summaries override auto-generation
-func TestSquashWispToPermanentWithSummary(t *testing.T) {
-	ctx := context.Background()
-
-	wispPath := t.TempDir() + "/wisp.db"
-	permPath := t.TempDir() + "/permanent.db"
-
-	wispStore, err := sqlite.New(ctx, wispPath)
-	if err != nil {
-		t.Fatalf("Failed to create wisp store: %v", err)
-	}
-	defer wispStore.Close()
-	if err := wispStore.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set wisp config: %v", err)
-	}
-
-	permStore, err := sqlite.New(ctx, permPath)
-	if err != nil {
-		t.Fatalf("Failed to create permanent store: %v", err)
-	}
-	defer permStore.Close()
-	if err := permStore.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set permanent config: %v", err)
-	}
-
-	// Create a simple wisp molecule
-	wispRoot := &types.Issue{
-		Title:     "Patrol Cycle",
-		Status:    types.StatusClosed,
-		Priority:  1,
-		IssueType: types.TypeEpic,
-		Wisp:      true,
-	}
-	if err := wispStore.CreateIssue(ctx, wispRoot, "test"); err != nil {
-		t.Fatalf("Failed to create wisp root: %v", err)
-	}
-
-	subgraph := &MoleculeSubgraph{
-		Root:   wispRoot,
-		Issues: []*types.Issue{wispRoot},
-	}
-
-	// Squash with agent-provided summary
-	agentSummary := "## AI-Generated Patrol Summary\n\nAll systems healthy. No issues found."
-	result, err := squashWispToPermanent(ctx, wispStore, permStore, subgraph, true, agentSummary, "test")
-	if err != nil {
-		t.Fatalf("squashWispToPermanent failed: %v", err)
-	}
-
-	// Verify digest uses agent summary
-	digest, err := permStore.GetIssue(ctx, result.DigestID)
-	if err != nil {
-		t.Fatalf("Failed to get digest: %v", err)
-	}
-	if digest.Description != agentSummary {
-		t.Errorf("Digest should use agent summary.\nGot: %s\nWant: %s", digest.Description, agentSummary)
-	}
-}
-
-// TestSquashWispToPermanentKeepChildren tests --keep-children flag
-func TestSquashWispToPermanentKeepChildren(t *testing.T) {
-	ctx := context.Background()
-
-	wispPath := t.TempDir() + "/wisp.db"
-	permPath := t.TempDir() + "/permanent.db"
-
-	wispStore, err := sqlite.New(ctx, wispPath)
-	if err != nil {
-		t.Fatalf("Failed to create wisp store: %v", err)
-	}
-	defer wispStore.Close()
-	if err := wispStore.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set wisp config: %v", err)
-	}
-
-	permStore, err := sqlite.New(ctx, permPath)
-	if err != nil {
-		t.Fatalf("Failed to create permanent store: %v", err)
-	}
-	defer permStore.Close()
-	if err := permStore.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set permanent config: %v", err)
-	}
-
-	// Create a wisp molecule
-	wispRoot := &types.Issue{
-		Title:     "Test Molecule",
-		Status:    types.StatusOpen,
-		Priority:  1,
-		IssueType: types.TypeEpic,
-		Wisp:      true,
-	}
-	if err := wispStore.CreateIssue(ctx, wispRoot, "test"); err != nil {
-		t.Fatalf("Failed to create wisp root: %v", err)
-	}
-
-	subgraph := &MoleculeSubgraph{
-		Root:   wispRoot,
-		Issues: []*types.Issue{wispRoot},
-	}
-
-	// Squash with keepChildren=true
-	result, err := squashWispToPermanent(ctx, wispStore, permStore, subgraph, true, "", "test")
-	if err != nil {
-		t.Fatalf("squashWispToPermanent failed: %v", err)
-	}
-
-	// Verify no deletion
-	if result.DeletedCount != 0 {
-		t.Errorf("DeletedCount = %d, want 0 (keep-children)", result.DeletedCount)
-	}
-	if !result.KeptChildren {
-		t.Error("KeptChildren should be true")
-	}
-
-	// Wisp should still exist
-	_, err = wispStore.GetIssue(ctx, wispRoot.ID)
-	if err != nil {
-		t.Error("Wisp should still exist with --keep-children")
-	}
-
-	// Digest should still be created
-	_, err = permStore.GetIssue(ctx, result.DigestID)
-	if err != nil {
-		t.Error("Digest should be created even with --keep-children")
-	}
-}
-
 // TestWispFilteringFromExport verifies that wisp issues are filtered
-// from JSONL export (bd-687g). Wisp issues should only exist in SQLite,
-// not in issues.jsonl, to prevent "zombie" resurrection after mol squash.
+// from sync (bd-687g). Wisp issues are stored in the dolt_ignore table,
+// excluded from push/pull, to prevent "zombie" resurrection after mol squash.
 func TestWispFilteringFromExport(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/test.db"
-	s, err := sqlite.New(ctx, dbPath)
+	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
 	if err != nil {
-		t.Fatalf("Failed to create store: %v", err)
+		t.Skipf("skipping: Dolt server not available: %v", err)
 	}
 	defer s.Close()
 	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
@@ -1585,14 +1307,14 @@ func TestWispFilteringFromExport(t *testing.T) {
 		Status:    types.StatusOpen,
 		Priority:  1,
 		IssueType: types.TypeTask,
-		Wisp:      false,
+		Ephemeral: false,
 	}
 	wispIssue := &types.Issue{
 		Title:     "Wisp Issue",
 		Status:    types.StatusOpen,
 		Priority:  2,
 		IssueType: types.TypeTask,
-		Wisp:      true,
+		Ephemeral: true,
 	}
 
 	if err := s.CreateIssue(ctx, normalIssue, "test"); err != nil {
@@ -1614,7 +1336,7 @@ func TestWispFilteringFromExport(t *testing.T) {
 	// Filter wisp issues (simulating export behavior)
 	exportableIssues := make([]*types.Issue, 0)
 	for _, issue := range allIssues {
-		if !issue.Wisp {
+		if !issue.Ephemeral {
 			exportableIssues = append(exportableIssues, issue)
 		}
 	}
@@ -1625,5 +1347,1946 @@ func TestWispFilteringFromExport(t *testing.T) {
 	}
 	if exportableIssues[0].ID != normalIssue.ID {
 		t.Errorf("Expected normal issue %s, got %s", normalIssue.ID, exportableIssues[0].ID)
+	}
+}
+
+// =============================================================================
+// Mol Current Tests (bd-nurq)
+// =============================================================================
+
+// TestGetMoleculeProgress tests loading a molecule and computing progress
+func TestGetMoleculeProgress(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/test.db"
+	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
+	if err != nil {
+		t.Skipf("skipping: Dolt server not available: %v", err)
+	}
+	defer s.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set config: %v", err)
+	}
+
+	// Create a molecule (epic with template label)
+	root := &types.Issue{
+		Title:     "Test Molecule",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeEpic,
+		Labels:    []string{BeadsTemplateLabel},
+		Assignee:  "test-agent",
+	}
+	if err := s.CreateIssue(ctx, root, "test"); err != nil {
+		t.Fatalf("Failed to create root: %v", err)
+	}
+
+	// Create steps with different statuses
+	step1 := &types.Issue{
+		Title:     "Step 1: Done",
+		Status:    types.StatusClosed,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	step2 := &types.Issue{
+		Title:     "Step 2: Current",
+		Status:    types.StatusInProgress,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	step3 := &types.Issue{
+		Title:     "Step 3: Pending",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+
+	for _, step := range []*types.Issue{step1, step2, step3} {
+		if err := s.CreateIssue(ctx, step, "test"); err != nil {
+			t.Fatalf("Failed to create step: %v", err)
+		}
+		// Add parent-child dependency
+		if err := s.AddDependency(ctx, &types.Dependency{
+			IssueID:     step.ID,
+			DependsOnID: root.ID,
+			Type:        types.DepParentChild,
+		}, "test"); err != nil {
+			t.Fatalf("Failed to add dependency: %v", err)
+		}
+	}
+
+	// Add blocking dependency: step3 blocks on step2
+	if err := s.AddDependency(ctx, &types.Dependency{
+		IssueID:     step3.ID,
+		DependsOnID: step2.ID,
+		Type:        types.DepBlocks,
+	}, "test"); err != nil {
+		t.Fatalf("Failed to add blocking dependency: %v", err)
+	}
+
+	// Get progress
+	progress, err := getMoleculeProgress(ctx, s, root.ID)
+	if err != nil {
+		t.Fatalf("getMoleculeProgress failed: %v", err)
+	}
+
+	// Verify progress
+	if progress.MoleculeID != root.ID {
+		t.Errorf("MoleculeID = %q, want %q", progress.MoleculeID, root.ID)
+	}
+	if progress.MoleculeTitle != root.Title {
+		t.Errorf("MoleculeTitle = %q, want %q", progress.MoleculeTitle, root.Title)
+	}
+	if progress.Assignee != "test-agent" {
+		t.Errorf("Assignee = %q, want %q", progress.Assignee, "test-agent")
+	}
+	if progress.Total != 3 {
+		t.Errorf("Total = %d, want 3", progress.Total)
+	}
+	if progress.Completed != 1 {
+		t.Errorf("Completed = %d, want 1", progress.Completed)
+	}
+	if progress.CurrentStep == nil {
+		t.Error("CurrentStep should not be nil")
+	} else if progress.CurrentStep.ID != step2.ID {
+		t.Errorf("CurrentStep.ID = %q, want %q", progress.CurrentStep.ID, step2.ID)
+	}
+	if len(progress.Steps) != 3 {
+		t.Errorf("Steps count = %d, want 3", len(progress.Steps))
+	}
+}
+
+// TestFindParentMolecule tests walking up parent-child chain
+func TestFindParentMolecule(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/test.db"
+	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
+	if err != nil {
+		t.Skipf("skipping: Dolt server not available: %v", err)
+	}
+	defer s.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set config: %v", err)
+	}
+
+	// Create molecule root (epic with template label)
+	root := &types.Issue{
+		Title:     "Molecule Root",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeEpic,
+		Labels:    []string{BeadsTemplateLabel},
+	}
+	if err := s.CreateIssue(ctx, root, "test"); err != nil {
+		t.Fatalf("Failed to create root: %v", err)
+	}
+
+	// Create child step
+	child := &types.Issue{
+		Title:     "Child Step",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := s.CreateIssue(ctx, child, "test"); err != nil {
+		t.Fatalf("Failed to create child: %v", err)
+	}
+	if err := s.AddDependency(ctx, &types.Dependency{
+		IssueID:     child.ID,
+		DependsOnID: root.ID,
+		Type:        types.DepParentChild,
+	}, "test"); err != nil {
+		t.Fatalf("Failed to add parent-child: %v", err)
+	}
+
+	// Create grandchild
+	grandchild := &types.Issue{
+		Title:     "Grandchild Step",
+		Status:    types.StatusOpen,
+		Priority:  3,
+		IssueType: types.TypeTask,
+	}
+	if err := s.CreateIssue(ctx, grandchild, "test"); err != nil {
+		t.Fatalf("Failed to create grandchild: %v", err)
+	}
+	if err := s.AddDependency(ctx, &types.Dependency{
+		IssueID:     grandchild.ID,
+		DependsOnID: child.ID,
+		Type:        types.DepParentChild,
+	}, "test"); err != nil {
+		t.Fatalf("Failed to add grandchild parent-child: %v", err)
+	}
+
+	// Find parent molecule from grandchild
+	moleculeID := findParentMolecule(ctx, s, grandchild.ID)
+	if moleculeID != root.ID {
+		t.Errorf("findParentMolecule(grandchild) = %q, want %q", moleculeID, root.ID)
+	}
+
+	// Find parent molecule from child
+	moleculeID = findParentMolecule(ctx, s, child.ID)
+	if moleculeID != root.ID {
+		t.Errorf("findParentMolecule(child) = %q, want %q", moleculeID, root.ID)
+	}
+
+	// Find parent molecule from root
+	moleculeID = findParentMolecule(ctx, s, root.ID)
+	if moleculeID != root.ID {
+		t.Errorf("findParentMolecule(root) = %q, want %q", moleculeID, root.ID)
+	}
+
+	// Create orphan issue (not part of any molecule)
+	orphan := &types.Issue{
+		Title:     "Orphan Issue",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := s.CreateIssue(ctx, orphan, "test"); err != nil {
+		t.Fatalf("Failed to create orphan: %v", err)
+	}
+
+	// Should return empty for orphan
+	moleculeID = findParentMolecule(ctx, s, orphan.ID)
+	if moleculeID != "" {
+		t.Errorf("findParentMolecule(orphan) = %q, want empty", moleculeID)
+	}
+}
+
+// TestFindParentMoleculesBatch tests batch-finding molecule roots (bd-hn4q)
+func TestFindParentMoleculesBatch(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/test.db"
+	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
+	if err != nil {
+		t.Skipf("skipping: Dolt server not available: %v", err)
+	}
+	defer s.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set config: %v", err)
+	}
+
+	// Create molecule root (epic with template label)
+	root := &types.Issue{
+		Title:     "Molecule Root",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeEpic,
+		Labels:    []string{BeadsTemplateLabel},
+	}
+	if err := s.CreateIssue(ctx, root, "test"); err != nil {
+		t.Fatalf("Failed to create root: %v", err)
+	}
+
+	// Create child step
+	child := &types.Issue{
+		Title:     "Child Step",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := s.CreateIssue(ctx, child, "test"); err != nil {
+		t.Fatalf("Failed to create child: %v", err)
+	}
+	if err := s.AddDependency(ctx, &types.Dependency{
+		IssueID:     child.ID,
+		DependsOnID: root.ID,
+		Type:        types.DepParentChild,
+	}, "test"); err != nil {
+		t.Fatalf("Failed to add parent-child: %v", err)
+	}
+
+	// Create grandchild
+	grandchild := &types.Issue{
+		Title:     "Grandchild Step",
+		Status:    types.StatusOpen,
+		Priority:  3,
+		IssueType: types.TypeTask,
+	}
+	if err := s.CreateIssue(ctx, grandchild, "test"); err != nil {
+		t.Fatalf("Failed to create grandchild: %v", err)
+	}
+	if err := s.AddDependency(ctx, &types.Dependency{
+		IssueID:     grandchild.ID,
+		DependsOnID: child.ID,
+		Type:        types.DepParentChild,
+	}, "test"); err != nil {
+		t.Fatalf("Failed to add grandchild parent-child: %v", err)
+	}
+
+	// Create orphan issue (not part of any molecule)
+	orphan := &types.Issue{
+		Title:     "Orphan Issue",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := s.CreateIssue(ctx, orphan, "test"); err != nil {
+		t.Fatalf("Failed to create orphan: %v", err)
+	}
+
+	// Batch-find molecule roots for all issues at once
+	roots := findParentMolecules(ctx, s, []string{grandchild.ID, child.ID, root.ID, orphan.ID})
+
+	if got := roots[grandchild.ID]; got != root.ID {
+		t.Errorf("findParentMolecules[grandchild] = %q, want %q", got, root.ID)
+	}
+	if got := roots[child.ID]; got != root.ID {
+		t.Errorf("findParentMolecules[child] = %q, want %q", got, root.ID)
+	}
+	if got := roots[root.ID]; got != root.ID {
+		t.Errorf("findParentMolecules[root] = %q, want %q", got, root.ID)
+	}
+	if got := roots[orphan.ID]; got != "" {
+		t.Errorf("findParentMolecules[orphan] = %q, want empty", got)
+	}
+
+	// Empty input should return nil
+	if result := findParentMolecules(ctx, s, nil); result != nil {
+		t.Errorf("findParentMolecules(nil) = %v, want nil", result)
+	}
+}
+
+// TestFindHookedMolecules tests finding molecules bonded to hooked issues
+func TestFindHookedMolecules(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/test.db"
+	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
+	if err != nil {
+		t.Skipf("skipping: Dolt server not available: %v", err)
+	}
+	defer s.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set config: %v", err)
+	}
+
+	// Create molecule root (epic)
+	molecule := &types.Issue{
+		Title:     "Test Molecule",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeEpic,
+	}
+	if err := s.CreateIssue(ctx, molecule, "test"); err != nil {
+		t.Fatalf("Failed to create molecule: %v", err)
+	}
+
+	// Create step as child of molecule
+	step := &types.Issue{
+		Title:     "Step 1",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := s.CreateIssue(ctx, step, "test"); err != nil {
+		t.Fatalf("Failed to create step: %v", err)
+	}
+	if err := s.AddDependency(ctx, &types.Dependency{
+		IssueID:     step.ID,
+		DependsOnID: molecule.ID,
+		Type:        types.DepParentChild,
+	}, "test"); err != nil {
+		t.Fatalf("Failed to add parent-child: %v", err)
+	}
+
+	// Create hooked issue with blocks dependency on molecule
+	hookedIssue := &types.Issue{
+		Title:     "Hooked Work",
+		Status:    types.StatusHooked,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Assignee:  "test-agent",
+	}
+	if err := s.CreateIssue(ctx, hookedIssue, "test"); err != nil {
+		t.Fatalf("Failed to create hooked issue: %v", err)
+	}
+	if err := s.AddDependency(ctx, &types.Dependency{
+		IssueID:     hookedIssue.ID,
+		DependsOnID: molecule.ID,
+		Type:        types.DepBlocks,
+	}, "test"); err != nil {
+		t.Fatalf("Failed to add blocks dependency: %v", err)
+	}
+
+	// Test: findHookedMolecules should find the molecule for this agent
+	molecules := findHookedMolecules(ctx, s, "test-agent")
+	if len(molecules) != 1 {
+		t.Fatalf("findHookedMolecules() got %d molecules, want 1", len(molecules))
+	}
+	if molecules[0].MoleculeID != molecule.ID {
+		t.Errorf("findHookedMolecules() got molecule %q, want %q", molecules[0].MoleculeID, molecule.ID)
+	}
+
+	// Test: different agent should not find the molecule
+	molecules = findHookedMolecules(ctx, s, "other-agent")
+	if len(molecules) != 0 {
+		t.Errorf("findHookedMolecules(other-agent) got %d molecules, want 0", len(molecules))
+	}
+
+	// Test: no agent filter should find the molecule
+	molecules = findHookedMolecules(ctx, s, "")
+	if len(molecules) != 1 {
+		t.Errorf("findHookedMolecules('') got %d molecules, want 1", len(molecules))
+	}
+}
+
+// TestAdvanceToNextStep tests auto-advancing to next step
+func TestAdvanceToNextStep(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/test.db"
+	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
+	if err != nil {
+		t.Skipf("skipping: Dolt server not available: %v", err)
+	}
+	defer s.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set config: %v", err)
+	}
+
+	// Create molecule with sequential steps
+	root := &types.Issue{
+		Title:     "Advance Test Molecule",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeEpic,
+		Labels:    []string{BeadsTemplateLabel},
+	}
+	if err := s.CreateIssue(ctx, root, "test"); err != nil {
+		t.Fatalf("Failed to create root: %v", err)
+	}
+
+	step1 := &types.Issue{
+		Title:     "Step 1",
+		Status:    types.StatusClosed,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	step2 := &types.Issue{
+		Title:     "Step 2",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+
+	for _, step := range []*types.Issue{step1, step2} {
+		if err := s.CreateIssue(ctx, step, "test"); err != nil {
+			t.Fatalf("Failed to create step: %v", err)
+		}
+		if err := s.AddDependency(ctx, &types.Dependency{
+			IssueID:     step.ID,
+			DependsOnID: root.ID,
+			Type:        types.DepParentChild,
+		}, "test"); err != nil {
+			t.Fatalf("Failed to add dependency: %v", err)
+		}
+	}
+
+	// step2 blocks on step1
+	if err := s.AddDependency(ctx, &types.Dependency{
+		IssueID:     step2.ID,
+		DependsOnID: step1.ID,
+		Type:        types.DepBlocks,
+	}, "test"); err != nil {
+		t.Fatalf("Failed to add blocking dependency: %v", err)
+	}
+
+	// Advance from step1 (just closed) without auto-claim
+	result, err := AdvanceToNextStep(ctx, s, step1.ID, false, "test")
+	if err != nil {
+		t.Fatalf("AdvanceToNextStep failed: %v", err)
+	}
+	if result == nil {
+		t.Fatal("result should not be nil")
+	}
+	if result.MoleculeID != root.ID {
+		t.Errorf("MoleculeID = %q, want %q", result.MoleculeID, root.ID)
+	}
+	if result.NextStep == nil {
+		t.Error("NextStep should not be nil")
+	} else if result.NextStep.ID != step2.ID {
+		t.Errorf("NextStep.ID = %q, want %q", result.NextStep.ID, step2.ID)
+	}
+	if result.AutoAdvanced {
+		t.Error("AutoAdvanced should be false when not requested")
+	}
+
+	// Verify step2 is still open
+	step2Updated, _ := s.GetIssue(ctx, step2.ID)
+	if step2Updated.Status != types.StatusOpen {
+		t.Errorf("Step2 status = %v, want open (no auto-claim)", step2Updated.Status)
+	}
+
+	// Now test with auto-claim
+	result, err = AdvanceToNextStep(ctx, s, step1.ID, true, "test")
+	if err != nil {
+		t.Fatalf("AdvanceToNextStep with auto-claim failed: %v", err)
+	}
+	if !result.AutoAdvanced {
+		t.Error("AutoAdvanced should be true when requested")
+	}
+
+	// Verify step2 is now in_progress
+	step2Updated, _ = s.GetIssue(ctx, step2.ID)
+	if step2Updated.Status != types.StatusInProgress {
+		t.Errorf("Step2 status = %v, want in_progress (auto-claim)", step2Updated.Status)
+	}
+}
+
+// TestAdvanceToNextStepMoleculeComplete tests behavior when molecule is complete
+func TestAdvanceToNextStepMoleculeComplete(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/test.db"
+	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
+	if err != nil {
+		t.Skipf("skipping: Dolt server not available: %v", err)
+	}
+	defer s.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set config: %v", err)
+	}
+
+	// Create molecule with single step
+	root := &types.Issue{
+		Title:     "Complete Test Molecule",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeEpic,
+		Labels:    []string{BeadsTemplateLabel},
+	}
+	if err := s.CreateIssue(ctx, root, "test"); err != nil {
+		t.Fatalf("Failed to create root: %v", err)
+	}
+
+	step1 := &types.Issue{
+		Title:     "Only Step",
+		Status:    types.StatusClosed,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := s.CreateIssue(ctx, step1, "test"); err != nil {
+		t.Fatalf("Failed to create step: %v", err)
+	}
+	if err := s.AddDependency(ctx, &types.Dependency{
+		IssueID:     step1.ID,
+		DependsOnID: root.ID,
+		Type:        types.DepParentChild,
+	}, "test"); err != nil {
+		t.Fatalf("Failed to add dependency: %v", err)
+	}
+
+	// Advance from the only step (molecule should be complete)
+	result, err := AdvanceToNextStep(ctx, s, step1.ID, false, "test")
+	if err != nil {
+		t.Fatalf("AdvanceToNextStep failed: %v", err)
+	}
+	if result == nil {
+		t.Fatal("result should not be nil")
+	}
+	if !result.MolComplete {
+		t.Error("MolComplete should be true when all steps are done")
+	}
+	if result.NextStep != nil {
+		t.Error("NextStep should be nil when molecule is complete")
+	}
+}
+
+// TestAdvanceToNextStepOrphanIssue tests behavior for non-molecule issues
+func TestAdvanceToNextStepOrphanIssue(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/test.db"
+	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
+	if err != nil {
+		t.Skipf("skipping: Dolt server not available: %v", err)
+	}
+	defer s.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set config: %v", err)
+	}
+
+	// Create standalone issue (not part of molecule)
+	orphan := &types.Issue{
+		Title:     "Standalone Issue",
+		Status:    types.StatusClosed,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := s.CreateIssue(ctx, orphan, "test"); err != nil {
+		t.Fatalf("Failed to create orphan: %v", err)
+	}
+
+	// Advance should return nil (not part of molecule)
+	result, err := AdvanceToNextStep(ctx, s, orphan.ID, false, "test")
+	if err != nil {
+		t.Fatalf("AdvanceToNextStep failed: %v", err)
+	}
+	if result != nil {
+		t.Error("result should be nil for orphan issue")
+	}
+}
+
+// TestAdvanceToNextStepConcurrentClaim tests optimistic concurrency: when the
+// first ready step has already been claimed by another agent, AdvanceToNextStep
+// falls back to the next available ready step.
+func TestAdvanceToNextStepConcurrentClaim(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/test.db"
+	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
+	if err != nil {
+		t.Skipf("skipping: Dolt server not available: %v", err)
+	}
+	defer s.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set config: %v", err)
+	}
+
+	// Create molecule: root -> step1 (closed), step2 (open), step3 (open)
+	// step2 and step3 both depend on step1, so both become ready when step1 closes.
+	root := &types.Issue{
+		Title:     "Concurrent Claim Test Molecule",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeEpic,
+		Labels:    []string{BeadsTemplateLabel},
+	}
+	if err := s.CreateIssue(ctx, root, "test"); err != nil {
+		t.Fatalf("Failed to create root: %v", err)
+	}
+
+	step1 := &types.Issue{
+		Title:     "Step 1 (closed)",
+		Status:    types.StatusClosed,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	step2 := &types.Issue{
+		Title:     "Step 2 (will be pre-claimed)",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	step3 := &types.Issue{
+		Title:     "Step 3 (fallback target)",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+
+	for _, step := range []*types.Issue{step1, step2, step3} {
+		if err := s.CreateIssue(ctx, step, "test"); err != nil {
+			t.Fatalf("Failed to create step: %v", err)
+		}
+		if err := s.AddDependency(ctx, &types.Dependency{
+			IssueID:     step.ID,
+			DependsOnID: root.ID,
+			Type:        types.DepParentChild,
+		}, "test"); err != nil {
+			t.Fatalf("Failed to add parent dependency: %v", err)
+		}
+	}
+
+	// step2 and step3 both depend on step1
+	for _, step := range []*types.Issue{step2, step3} {
+		if err := s.AddDependency(ctx, &types.Dependency{
+			IssueID:     step.ID,
+			DependsOnID: step1.ID,
+			Type:        types.DepBlocks,
+		}, "test"); err != nil {
+			t.Fatalf("Failed to add blocking dependency: %v", err)
+		}
+	}
+
+	// Simulate another agent claiming step2 (TOCTOU race scenario)
+	if err := s.UpdateIssue(ctx, step2.ID, map[string]interface{}{
+		"status": types.StatusInProgress,
+	}, "other-agent"); err != nil {
+		t.Fatalf("Failed to pre-claim step2: %v", err)
+	}
+
+	// Now our agent tries to advance with autoClaim — step2 was identified as
+	// ready during the read phase, but it's already in_progress. The function
+	// should fall back to step3.
+	result, err := AdvanceToNextStep(ctx, s, step1.ID, true, "our-agent")
+	if err != nil {
+		t.Fatalf("AdvanceToNextStep failed: %v", err)
+	}
+	if result == nil {
+		t.Fatal("result should not be nil")
+	}
+	if !result.AutoAdvanced {
+		t.Error("AutoAdvanced should be true (should have claimed step3)")
+	}
+	if result.NextStep == nil {
+		t.Fatal("NextStep should not be nil")
+	}
+	if result.NextStep.ID != step3.ID {
+		t.Errorf("NextStep.ID = %q, want %q (should fall back to step3)", result.NextStep.ID, step3.ID)
+	}
+
+	// Verify step3 is now in_progress
+	step3Updated, _ := s.GetIssue(ctx, step3.ID)
+	if step3Updated.Status != types.StatusInProgress {
+		t.Errorf("Step3 status = %v, want in_progress", step3Updated.Status)
+	}
+}
+
+// TestAdvanceToNextStepAllClaimed tests that when all ready steps are already
+// claimed by other agents, AdvanceToNextStep reports no auto-advance.
+func TestAdvanceToNextStepAllClaimed(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/test.db"
+	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
+	if err != nil {
+		t.Skipf("skipping: Dolt server not available: %v", err)
+	}
+	defer s.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set config: %v", err)
+	}
+
+	// Create molecule: root -> step1 (closed), step2 (open, will be pre-claimed)
+	root := &types.Issue{
+		Title:     "All Claimed Test Molecule",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeEpic,
+		Labels:    []string{BeadsTemplateLabel},
+	}
+	if err := s.CreateIssue(ctx, root, "test"); err != nil {
+		t.Fatalf("Failed to create root: %v", err)
+	}
+
+	step1 := &types.Issue{
+		Title:     "Step 1 (closed)",
+		Status:    types.StatusClosed,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	step2 := &types.Issue{
+		Title:     "Step 2 (only ready, will be pre-claimed)",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+
+	for _, step := range []*types.Issue{step1, step2} {
+		if err := s.CreateIssue(ctx, step, "test"); err != nil {
+			t.Fatalf("Failed to create step: %v", err)
+		}
+		if err := s.AddDependency(ctx, &types.Dependency{
+			IssueID:     step.ID,
+			DependsOnID: root.ID,
+			Type:        types.DepParentChild,
+		}, "test"); err != nil {
+			t.Fatalf("Failed to add parent dependency: %v", err)
+		}
+	}
+
+	// step2 depends on step1
+	if err := s.AddDependency(ctx, &types.Dependency{
+		IssueID:     step2.ID,
+		DependsOnID: step1.ID,
+		Type:        types.DepBlocks,
+	}, "test"); err != nil {
+		t.Fatalf("Failed to add blocking dependency: %v", err)
+	}
+
+	// Pre-claim the only ready step
+	if err := s.UpdateIssue(ctx, step2.ID, map[string]interface{}{
+		"status": types.StatusInProgress,
+	}, "other-agent"); err != nil {
+		t.Fatalf("Failed to pre-claim step2: %v", err)
+	}
+
+	// Advance with autoClaim — should fail gracefully (no steps to claim)
+	result, err := AdvanceToNextStep(ctx, s, step1.ID, true, "our-agent")
+	if err != nil {
+		t.Fatalf("AdvanceToNextStep failed: %v", err)
+	}
+	if result == nil {
+		t.Fatal("result should not be nil")
+	}
+	if result.AutoAdvanced {
+		t.Error("AutoAdvanced should be false when all ready steps are claimed")
+	}
+}
+
+// =============================================================================
+// Dynamic Bonding Tests (bd-xo1o.1)
+// =============================================================================
+
+// TestGenerateBondedID tests the custom ID generation for dynamic bonding
+func TestGenerateBondedID(t *testing.T) {
+	tests := []struct {
+		name     string
+		oldID    string
+		rootID   string
+		opts     CloneOptions
+		wantID   string
+		wantErr  bool
+		errMatch string
+	}{
+		{
+			name:   "root issue with simple childRef",
+			oldID:  "mol-arm",
+			rootID: "mol-arm",
+			opts: CloneOptions{
+				ParentID: "patrol-x7k",
+				ChildRef: "arm-ace",
+			},
+			wantID: "patrol-x7k.arm-ace",
+		},
+		{
+			name:   "root issue with variable substitution",
+			oldID:  "mol-arm",
+			rootID: "mol-arm",
+			opts: CloneOptions{
+				ParentID: "patrol-x7k",
+				ChildRef: "arm-{{polecat_name}}",
+				Vars:     map[string]string{"polecat_name": "ace"},
+			},
+			wantID: "patrol-x7k.arm-ace",
+		},
+		{
+			name:   "child issue with relative ID",
+			oldID:  "mol-arm.capture",
+			rootID: "mol-arm",
+			opts: CloneOptions{
+				ParentID: "patrol-x7k",
+				ChildRef: "arm-ace",
+			},
+			wantID: "patrol-x7k.arm-ace.capture",
+		},
+		{
+			name:   "nested child issue",
+			oldID:  "mol-arm.capture.sub",
+			rootID: "mol-arm",
+			opts: CloneOptions{
+				ParentID: "patrol-x7k",
+				ChildRef: "arm-ace",
+			},
+			wantID: "patrol-x7k.arm-ace.capture.sub",
+		},
+		{
+			name:   "no parent ID returns empty (not a bonded operation)",
+			oldID:  "mol-arm",
+			rootID: "mol-arm",
+			opts:   CloneOptions{},
+			wantID: "",
+		},
+		{
+			name:   "empty childRef after substitution is error",
+			oldID:  "mol-arm",
+			rootID: "mol-arm",
+			opts: CloneOptions{
+				ParentID: "patrol-x7k",
+				ChildRef: "{{missing_var}}",
+			},
+			wantErr:  true,
+			errMatch: "invalid childRef",
+		},
+		{
+			name:   "childRef with special chars is error",
+			oldID:  "mol-arm",
+			rootID: "mol-arm",
+			opts: CloneOptions{
+				ParentID: "patrol-x7k",
+				ChildRef: "arm/ace",
+			},
+			wantErr:  true,
+			errMatch: "invalid childRef",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotID, err := generateBondedID(tt.oldID, tt.rootID, tt.opts)
+
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("generateBondedID() expected error containing %q, got nil", tt.errMatch)
+				} else if !strings.Contains(err.Error(), tt.errMatch) {
+					t.Errorf("generateBondedID() error = %q, want error containing %q", err.Error(), tt.errMatch)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Errorf("generateBondedID() unexpected error: %v", err)
+				return
+			}
+
+			if gotID != tt.wantID {
+				t.Errorf("generateBondedID() = %q, want %q", gotID, tt.wantID)
+			}
+		})
+	}
+}
+
+// TestGetRelativeID tests extracting relative portion from child IDs
+func TestGetRelativeID(t *testing.T) {
+	tests := []struct {
+		name   string
+		oldID  string
+		rootID string
+		want   string
+	}{
+		{
+			name:   "same ID returns empty",
+			oldID:  "mol-arm",
+			rootID: "mol-arm",
+			want:   "",
+		},
+		{
+			name:   "child with single step",
+			oldID:  "mol-arm.capture",
+			rootID: "mol-arm",
+			want:   "capture",
+		},
+		{
+			name:   "child with nested steps",
+			oldID:  "mol-arm.capture.sub.deep",
+			rootID: "mol-arm",
+			want:   "capture.sub.deep",
+		},
+		{
+			name:   "unrelated IDs returns empty",
+			oldID:  "other-123",
+			rootID: "mol-arm",
+			want:   "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := getRelativeID(tt.oldID, tt.rootID)
+			if got != tt.want {
+				t.Errorf("getRelativeID() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBondProtoMolWithRef tests dynamic bonding with custom child references
+func TestBondProtoMolWithRef(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/test.db"
+	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
+	if err != nil {
+		t.Skipf("skipping: Dolt server not available: %v", err)
+	}
+	defer s.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", "patrol"); err != nil {
+		t.Fatalf("Failed to set config: %v", err)
+	}
+
+	// Create a proto with child steps (mol-polecat-arm template)
+	protoRoot := &types.Issue{
+		Title:     "Polecat Arm: {{polecat_name}}",
+		IssueType: types.TypeEpic,
+		Status:    types.StatusOpen,
+		Priority:  2,
+		Labels:    []string{MoleculeLabel},
+	}
+	if err := s.CreateIssue(ctx, protoRoot, "test"); err != nil {
+		t.Fatalf("Failed to create proto root: %v", err)
+	}
+
+	// Add proto steps
+	protoCapture := &types.Issue{
+		Title:     "Capture {{polecat_name}}",
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+		Priority:  2,
+	}
+	if err := s.CreateIssue(ctx, protoCapture, "test"); err != nil {
+		t.Fatalf("Failed to create proto capture: %v", err)
+	}
+	if err := s.AddDependency(ctx, &types.Dependency{
+		IssueID:     protoCapture.ID,
+		DependsOnID: protoRoot.ID,
+		Type:        types.DepParentChild,
+	}, "test"); err != nil {
+		t.Fatalf("Failed to add proto dependency: %v", err)
+	}
+
+	// Create target molecule (patrol-xxx)
+	patrol := &types.Issue{
+		Title:     "Witness Patrol",
+		IssueType: types.TypeEpic,
+		Status:    types.StatusInProgress,
+		Priority:  1,
+	}
+	if err := s.CreateIssue(ctx, patrol, "test"); err != nil {
+		t.Fatalf("Failed to create patrol: %v", err)
+	}
+
+	// Bond proto to patrol with custom child ref
+	vars := map[string]string{"polecat_name": "ace"}
+	childRef := "arm-{{polecat_name}}"
+	result, err := bondProtoMol(ctx, s, protoRoot, patrol, types.BondTypeSequential, vars, childRef, "test", false, false)
+	if err != nil {
+		t.Fatalf("bondProtoMol failed: %v", err)
+	}
+
+	// Verify spawned count
+	if result.Spawned != 2 {
+		t.Errorf("Spawned = %d, want 2", result.Spawned)
+	}
+
+	// Verify root ID follows pattern: patrol.arm-ace
+	expectedRootID := patrol.ID + ".arm-ace"
+	if result.IDMapping[protoRoot.ID] != expectedRootID {
+		t.Errorf("Root ID = %q, want %q", result.IDMapping[protoRoot.ID], expectedRootID)
+	}
+
+	// Verify child ID follows pattern: patrol.arm-ace.relative
+	// The child's ID should be patrol.arm-ace.capture (but relative part depends on proto structure)
+	childID := result.IDMapping[protoCapture.ID]
+	if !strings.HasPrefix(childID, expectedRootID+".") {
+		t.Errorf("Child ID %q should start with %q", childID, expectedRootID+".")
+	}
+
+	// Verify the spawned issues exist and have correct titles
+	spawnedRoot, err := s.GetIssue(ctx, expectedRootID)
+	if err != nil {
+		t.Fatalf("Failed to get spawned root: %v", err)
+	}
+	if !strings.Contains(spawnedRoot.Title, "ace") {
+		t.Errorf("Spawned root title %q should contain 'ace'", spawnedRoot.Title)
+	}
+}
+
+// TestBondProtoMolMultipleArms tests bonding multiple arms to the same parent
+func TestBondProtoMolMultipleArms(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/test.db"
+	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
+	if err != nil {
+		t.Skipf("skipping: Dolt server not available: %v", err)
+	}
+	defer s.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", "patrol"); err != nil {
+		t.Fatalf("Failed to set config: %v", err)
+	}
+
+	// Create simple proto
+	proto := &types.Issue{
+		Title:     "Arm: {{name}}",
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+		Priority:  2,
+		Labels:    []string{MoleculeLabel},
+	}
+	if err := s.CreateIssue(ctx, proto, "test"); err != nil {
+		t.Fatalf("Failed to create proto: %v", err)
+	}
+
+	// Create parent patrol
+	patrol := &types.Issue{
+		Title:     "Patrol",
+		IssueType: types.TypeEpic,
+		Status:    types.StatusOpen,
+		Priority:  1,
+	}
+	if err := s.CreateIssue(ctx, patrol, "test"); err != nil {
+		t.Fatalf("Failed to create patrol: %v", err)
+	}
+
+	// Bond arm-ace
+	varsAce := map[string]string{"name": "ace"}
+	resultAce, err := bondProtoMol(ctx, s, proto, patrol, types.BondTypeParallel, varsAce, "arm-{{name}}", "test", false, false)
+	if err != nil {
+		t.Fatalf("bondProtoMol (ace) failed: %v", err)
+	}
+
+	// Bond arm-nux
+	varsNux := map[string]string{"name": "nux"}
+	resultNux, err := bondProtoMol(ctx, s, proto, patrol, types.BondTypeParallel, varsNux, "arm-{{name}}", "test", false, false)
+	if err != nil {
+		t.Fatalf("bondProtoMol (nux) failed: %v", err)
+	}
+
+	// Verify IDs are correct and distinct
+	aceID := resultAce.IDMapping[proto.ID]
+	nuxID := resultNux.IDMapping[proto.ID]
+
+	expectedAceID := patrol.ID + ".arm-ace"
+	expectedNuxID := patrol.ID + ".arm-nux"
+
+	if aceID != expectedAceID {
+		t.Errorf("Ace ID = %q, want %q", aceID, expectedAceID)
+	}
+	if nuxID != expectedNuxID {
+		t.Errorf("Nux ID = %q, want %q", nuxID, expectedNuxID)
+	}
+
+	// Verify both exist
+	aceIssue, err := s.GetIssue(ctx, aceID)
+	if err != nil || aceIssue == nil {
+		t.Errorf("Ace issue not found: %v", err)
+	}
+	nuxIssue, err := s.GetIssue(ctx, nuxID)
+	if err != nil || nuxIssue == nil {
+		t.Errorf("Nux issue not found: %v", err)
+	}
+}
+
+// =============================================================================
+// Parallel Detection Tests (bd-xo1o.4)
+// =============================================================================
+
+// TestAnalyzeMoleculeParallelNoBlocking tests parallel detection with no blocking deps
+func TestAnalyzeMoleculeParallelNoBlocking(t *testing.T) {
+	// Create a simple molecule with parallel children (no blocking deps between them)
+	root := &types.Issue{
+		ID:        "mol-test",
+		Title:     "Test Molecule",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeEpic,
+	}
+	child1 := &types.Issue{
+		ID:        "mol-test.step1",
+		Title:     "Step 1",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+	}
+	child2 := &types.Issue{
+		ID:        "mol-test.step2",
+		Title:     "Step 2",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+	}
+
+	subgraph := &MoleculeSubgraph{
+		Root:   root,
+		Issues: []*types.Issue{root, child1, child2},
+		IssueMap: map[string]*types.Issue{
+			root.ID:   root,
+			child1.ID: child1,
+			child2.ID: child2,
+		},
+		Dependencies: []*types.Dependency{
+			{IssueID: child1.ID, DependsOnID: root.ID, Type: types.DepParentChild},
+			{IssueID: child2.ID, DependsOnID: root.ID, Type: types.DepParentChild},
+		},
+	}
+
+	analysis := analyzeMoleculeParallel(subgraph)
+
+	// All 3 should be ready (root + 2 children with no blocking deps)
+	if analysis.ReadySteps != 3 {
+		t.Errorf("ReadySteps = %d, want 3", analysis.ReadySteps)
+	}
+
+	// Children should be in the same parallel group
+	step1Info := analysis.Steps[child1.ID]
+	step2Info := analysis.Steps[child2.ID]
+
+	if step1Info.ParallelGroup == "" {
+		t.Error("Step1 should be in a parallel group")
+	}
+	if step1Info.ParallelGroup != step2Info.ParallelGroup {
+		t.Errorf("Step1 and Step2 should be in same parallel group: %s vs %s",
+			step1Info.ParallelGroup, step2Info.ParallelGroup)
+	}
+
+	// Check can_parallel
+	found := false
+	for _, id := range step1Info.CanParallel {
+		if id == child2.ID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("Step1.CanParallel should contain Step2.ID")
+	}
+}
+
+// TestAnalyzeMoleculeParallelWithBlocking tests parallel detection with blocking deps
+func TestAnalyzeMoleculeParallelWithBlocking(t *testing.T) {
+	// Create a sequential molecule: step1 blocks step2
+	root := &types.Issue{
+		ID:        "mol-seq",
+		Title:     "Sequential Molecule",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeEpic,
+	}
+	step1 := &types.Issue{
+		ID:        "mol-seq.step1",
+		Title:     "Step 1",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+	}
+	step2 := &types.Issue{
+		ID:        "mol-seq.step2",
+		Title:     "Step 2 (blocked by Step 1)",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+	}
+
+	subgraph := &MoleculeSubgraph{
+		Root:   root,
+		Issues: []*types.Issue{root, step1, step2},
+		IssueMap: map[string]*types.Issue{
+			root.ID:  root,
+			step1.ID: step1,
+			step2.ID: step2,
+		},
+		Dependencies: []*types.Dependency{
+			{IssueID: step1.ID, DependsOnID: root.ID, Type: types.DepParentChild},
+			{IssueID: step2.ID, DependsOnID: root.ID, Type: types.DepParentChild},
+			{IssueID: step2.ID, DependsOnID: step1.ID, Type: types.DepBlocks}, // step2 blocked by step1
+		},
+	}
+
+	analysis := analyzeMoleculeParallel(subgraph)
+
+	// Only root and step1 should be ready (step2 is blocked)
+	if analysis.ReadySteps != 2 {
+		t.Errorf("ReadySteps = %d, want 2 (step2 blocked)", analysis.ReadySteps)
+	}
+
+	step1Info := analysis.Steps[step1.ID]
+	step2Info := analysis.Steps[step2.ID]
+
+	if !step1Info.IsReady {
+		t.Error("Step1 should be ready")
+	}
+	if step2Info.IsReady {
+		t.Error("Step2 should NOT be ready (blocked by step1)")
+	}
+	if len(step2Info.BlockedBy) != 1 || step2Info.BlockedBy[0] != step1.ID {
+		t.Errorf("Step2.BlockedBy = %v, want [%s]", step2Info.BlockedBy, step1.ID)
+	}
+
+	// Step1 and Step2 should NOT be in the same parallel group
+	if step1Info.ParallelGroup != "" && step1Info.ParallelGroup == step2Info.ParallelGroup {
+		t.Error("Blocking steps should NOT be in the same parallel group")
+	}
+}
+
+// TestAnalyzeMoleculeParallelCompletedBlockers tests that completed steps don't block
+func TestAnalyzeMoleculeParallelCompletedBlockers(t *testing.T) {
+	// Create molecule where step1 is completed, so step2 should be ready
+	root := &types.Issue{
+		ID:        "mol-done",
+		Title:     "Molecule with completed step",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeEpic,
+	}
+	step1 := &types.Issue{
+		ID:        "mol-done.step1",
+		Title:     "Step 1 (completed)",
+		Status:    types.StatusClosed, // Completed!
+		IssueType: types.TypeTask,
+	}
+	step2 := &types.Issue{
+		ID:        "mol-done.step2",
+		Title:     "Step 2 (depends on step1)",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+	}
+
+	subgraph := &MoleculeSubgraph{
+		Root:   root,
+		Issues: []*types.Issue{root, step1, step2},
+		IssueMap: map[string]*types.Issue{
+			root.ID:  root,
+			step1.ID: step1,
+			step2.ID: step2,
+		},
+		Dependencies: []*types.Dependency{
+			{IssueID: step1.ID, DependsOnID: root.ID, Type: types.DepParentChild},
+			{IssueID: step2.ID, DependsOnID: root.ID, Type: types.DepParentChild},
+			{IssueID: step2.ID, DependsOnID: step1.ID, Type: types.DepBlocks},
+		},
+	}
+
+	analysis := analyzeMoleculeParallel(subgraph)
+
+	step2Info := analysis.Steps[step2.ID]
+
+	// Step2 should be ready since step1 is closed
+	if !step2Info.IsReady {
+		t.Error("Step2 should be ready (step1 is completed)")
+	}
+	if len(step2Info.BlockedBy) != 0 {
+		t.Errorf("Step2.BlockedBy = %v, want empty (step1 completed)", step2Info.BlockedBy)
+	}
+}
+
+func TestAnalyzeMoleculeParallelWaitsForChildrenOfSpawner(t *testing.T) {
+	root := &types.Issue{
+		ID:        "mol-fanout",
+		Title:     "Fanout Molecule",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeEpic,
+	}
+	implement := &types.Issue{
+		ID:        "mol-fanout.implement",
+		Title:     "Implement",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+	}
+	otherSpawner := &types.Issue{
+		ID:        "mol-fanout.other",
+		Title:     "Other spawner",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+	}
+	review := &types.Issue{
+		ID:        "mol-fanout.review",
+		Title:     "Review",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+	}
+	implChild := &types.Issue{
+		ID:        "mol-fanout.implement.arm-1",
+		Title:     "Implement child",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+	}
+	otherChild := &types.Issue{
+		ID:        "mol-fanout.other.arm-1",
+		Title:     "Other child",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+	}
+
+	subgraph := &MoleculeSubgraph{
+		Root:   root,
+		Issues: []*types.Issue{root, implement, otherSpawner, review, implChild, otherChild},
+		IssueMap: map[string]*types.Issue{
+			root.ID:         root,
+			implement.ID:    implement,
+			otherSpawner.ID: otherSpawner,
+			review.ID:       review,
+			implChild.ID:    implChild,
+			otherChild.ID:   otherChild,
+		},
+		Dependencies: []*types.Dependency{
+			{IssueID: implement.ID, DependsOnID: root.ID, Type: types.DepParentChild},
+			{IssueID: otherSpawner.ID, DependsOnID: root.ID, Type: types.DepParentChild},
+			{IssueID: review.ID, DependsOnID: root.ID, Type: types.DepParentChild},
+			{IssueID: implChild.ID, DependsOnID: implement.ID, Type: types.DepParentChild},
+			{IssueID: otherChild.ID, DependsOnID: otherSpawner.ID, Type: types.DepParentChild},
+			{
+				IssueID:     review.ID,
+				DependsOnID: implement.ID,
+				Type:        types.DepWaitsFor,
+				Metadata:    `{"gate":"all-children"}`,
+			},
+		},
+	}
+
+	t.Run("blocked-before-child-close", func(t *testing.T) {
+		analysis := analyzeMoleculeParallel(subgraph)
+		reviewInfo := analysis.Steps[review.ID]
+		if reviewInfo.IsReady {
+			t.Fatalf("review should be blocked while %s is open", implChild.ID)
+		}
+
+		hasImplChildBlocker := false
+		for _, blocker := range reviewInfo.BlockedBy {
+			if blocker == implChild.ID {
+				hasImplChildBlocker = true
+			}
+			if blocker == otherChild.ID {
+				t.Fatalf("review should not be blocked by unrelated child %s", otherChild.ID)
+			}
+		}
+		if !hasImplChildBlocker {
+			t.Fatalf("expected review to be blocked by child of implement spawner")
+		}
+	})
+
+	t.Run("ready-after-child-close", func(t *testing.T) {
+		implChild.Status = types.StatusClosed
+		analysisAfterClose := analyzeMoleculeParallel(subgraph)
+		if !analysisAfterClose.Steps[review.ID].IsReady {
+			t.Fatalf("review should become ready after %s closes", implChild.ID)
+		}
+	})
+}
+
+// TestAnalyzeMoleculeParallelMultipleArms tests parallel detection across bonded arms
+func TestAnalyzeMoleculeParallelMultipleArms(t *testing.T) {
+	// Create molecule with two arms that can run in parallel
+	root := &types.Issue{
+		ID:        "patrol",
+		Title:     "Patrol",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeEpic,
+	}
+	armAce := &types.Issue{
+		ID:        "patrol.arm-ace",
+		Title:     "Arm: ace",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+	}
+	armNux := &types.Issue{
+		ID:        "patrol.arm-nux",
+		Title:     "Arm: nux",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+	}
+
+	subgraph := &MoleculeSubgraph{
+		Root:   root,
+		Issues: []*types.Issue{root, armAce, armNux},
+		IssueMap: map[string]*types.Issue{
+			root.ID:   root,
+			armAce.ID: armAce,
+			armNux.ID: armNux,
+		},
+		Dependencies: []*types.Dependency{
+			{IssueID: armAce.ID, DependsOnID: root.ID, Type: types.DepParentChild},
+			{IssueID: armNux.ID, DependsOnID: root.ID, Type: types.DepParentChild},
+			// No blocking deps between arms
+		},
+	}
+
+	analysis := analyzeMoleculeParallel(subgraph)
+
+	// All 3 should be ready
+	if analysis.ReadySteps != 3 {
+		t.Errorf("ReadySteps = %d, want 3", analysis.ReadySteps)
+	}
+
+	// Arms should be in the same parallel group
+	aceInfo := analysis.Steps[armAce.ID]
+	nuxInfo := analysis.Steps[armNux.ID]
+
+	if aceInfo.ParallelGroup == "" {
+		t.Error("arm-ace should be in a parallel group")
+	}
+	if aceInfo.ParallelGroup != nuxInfo.ParallelGroup {
+		t.Errorf("Arms should be in same parallel group: %s vs %s",
+			aceInfo.ParallelGroup, nuxInfo.ParallelGroup)
+	}
+
+	// Should have at least one parallel group with both arms
+	foundGroup := false
+	for _, members := range analysis.ParallelGroups {
+		hasAce := false
+		hasNux := false
+		for _, id := range members {
+			if id == armAce.ID {
+				hasAce = true
+			}
+			if id == armNux.ID {
+				hasNux = true
+			}
+		}
+		if hasAce && hasNux {
+			foundGroup = true
+			break
+		}
+	}
+	if !foundGroup {
+		t.Error("Should have a parallel group containing both arms")
+	}
+}
+
+// TestCalculateBlockingDepths tests the depth calculation
+func TestCalculateBlockingDepths(t *testing.T) {
+	// Create chain: root -> step1 -> step2 -> step3
+	root := &types.Issue{ID: "root", Status: types.StatusOpen}
+	step1 := &types.Issue{ID: "step1", Status: types.StatusOpen}
+	step2 := &types.Issue{ID: "step2", Status: types.StatusOpen}
+	step3 := &types.Issue{ID: "step3", Status: types.StatusOpen}
+
+	subgraph := &MoleculeSubgraph{
+		Root:     root,
+		Issues:   []*types.Issue{root, step1, step2, step3},
+		IssueMap: map[string]*types.Issue{"root": root, "step1": step1, "step2": step2, "step3": step3},
+	}
+
+	blockedBy := map[string]map[string]bool{
+		"root":  {},
+		"step1": {"root": true},
+		"step2": {"step1": true},
+		"step3": {"step2": true},
+	}
+
+	depths := calculateBlockingDepths(subgraph, blockedBy)
+
+	if depths["root"] != 0 {
+		t.Errorf("root depth = %d, want 0", depths["root"])
+	}
+	if depths["step1"] != 1 {
+		t.Errorf("step1 depth = %d, want 1", depths["step1"])
+	}
+	if depths["step2"] != 2 {
+		t.Errorf("step2 depth = %d, want 2", depths["step2"])
+	}
+	if depths["step3"] != 3 {
+		t.Errorf("step3 depth = %d, want 3", depths["step3"])
+	}
+}
+
+// TestSpawnMoleculeEphemeralFlag verifies that spawnMolecule with ephemeral=true
+// creates issues with the Ephemeral flag set (bd-phin)
+func TestSpawnMoleculeEphemeralFlag(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/test.db"
+	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
+	if err != nil {
+		t.Skipf("skipping: Dolt server not available: %v", err)
+	}
+	defer s.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set config: %v", err)
+	}
+
+	// Create a template with a child (IDs will be auto-generated)
+	root := &types.Issue{
+		Title:     "Template Epic",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeEpic,
+		Labels:    []string{MoleculeLabel}, // Required for loadTemplateSubgraph
+	}
+	child := &types.Issue{
+		Title:     "Template Task",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+
+	if err := s.CreateIssue(ctx, root, "test"); err != nil {
+		t.Fatalf("Failed to create template root: %v", err)
+	}
+	if err := s.CreateIssue(ctx, child, "test"); err != nil {
+		t.Fatalf("Failed to create template child: %v", err)
+	}
+
+	// Add parent-child dependency
+	if err := s.AddDependency(ctx, &types.Dependency{
+		IssueID:     child.ID,
+		DependsOnID: root.ID,
+		Type:        types.DepParentChild,
+	}, "test"); err != nil {
+		t.Fatalf("Failed to add parent-child dependency: %v", err)
+	}
+
+	// Load subgraph
+	subgraph, err := loadTemplateSubgraph(ctx, s, root.ID)
+	if err != nil {
+		t.Fatalf("Failed to load subgraph: %v", err)
+	}
+
+	// Spawn with ephemeral=true
+	result, err := spawnMolecule(ctx, s, subgraph, nil, "", "test", true, "wisp")
+	if err != nil {
+		t.Fatalf("spawnMolecule failed: %v", err)
+	}
+
+	// Verify all spawned issues have Ephemeral=true
+	for oldID, newID := range result.IDMapping {
+		spawned, err := s.GetIssue(ctx, newID)
+		if err != nil {
+			t.Fatalf("Failed to get spawned issue %s: %v", newID, err)
+		}
+		if !spawned.Ephemeral {
+			t.Errorf("Spawned issue %s (from %s) should have Ephemeral=true, got false", newID, oldID)
+		}
+	}
+
+	// Verify spawned issues have the correct prefix
+	for _, newID := range result.IDMapping {
+		if !strings.HasPrefix(newID, "test-wisp-") {
+			t.Errorf("Spawned issue ID %s should have prefix 'test-wisp-'", newID)
+		}
+	}
+}
+
+// TestSpawnMoleculeFromFormulaEphemeral verifies that spawning from a cooked formula
+// with ephemeral=true creates issues with the Ephemeral flag set (bd-phin)
+func TestSpawnMoleculeFromFormulaEphemeral(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/test.db"
+	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
+	if err != nil {
+		t.Skipf("skipping: Dolt server not available: %v", err)
+	}
+	defer s.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set config: %v", err)
+	}
+
+	// Create a minimal in-memory subgraph (simulating cookFormulaToSubgraph output)
+	root := &types.Issue{
+		ID:         "test-formula",
+		Title:      "Test Formula",
+		Status:     types.StatusOpen,
+		Priority:   2,
+		IssueType:  types.TypeEpic,
+		IsTemplate: true,
+	}
+	step := &types.Issue{
+		ID:         "test-formula.step1",
+		Title:      "Step 1",
+		Status:     types.StatusOpen,
+		Priority:   2,
+		IssueType:  types.TypeTask,
+		IsTemplate: true,
+	}
+
+	subgraph := &TemplateSubgraph{
+		Root:   root,
+		Issues: []*types.Issue{root, step},
+		Dependencies: []*types.Dependency{
+			{
+				IssueID:     step.ID,
+				DependsOnID: root.ID,
+				Type:        types.DepParentChild,
+			},
+		},
+		IssueMap: map[string]*types.Issue{
+			root.ID: root,
+			step.ID: step,
+		},
+	}
+
+	// Spawn with ephemeral=true (simulating bd mol wisp <formula>)
+	result, err := spawnMolecule(ctx, s, subgraph, nil, "", "test", true, "wisp")
+	if err != nil {
+		t.Fatalf("spawnMolecule failed: %v", err)
+	}
+
+	// Verify all spawned issues have Ephemeral=true
+	for oldID, newID := range result.IDMapping {
+		spawned, err := s.GetIssue(ctx, newID)
+		if err != nil {
+			t.Fatalf("Failed to get spawned issue %s: %v", newID, err)
+		}
+		if !spawned.Ephemeral {
+			t.Errorf("Spawned issue %s (from %s) should have Ephemeral=true, got false", newID, oldID)
+		}
+		t.Logf("Issue %s: Ephemeral=%v", newID, spawned.Ephemeral)
+	}
+
+	// Verify they have the correct prefix
+	for _, newID := range result.IDMapping {
+		if !strings.HasPrefix(newID, "test-wisp-") {
+			t.Errorf("Spawned issue ID %s should have prefix 'test-wisp-'", newID)
+		}
+	}
+
+	// Verify ephemeral issues are excluded from ready work
+	readyWork, err := s.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork failed: %v", err)
+	}
+	for _, issue := range readyWork {
+		for _, spawnedID := range result.IDMapping {
+			if issue.ID == spawnedID {
+				t.Errorf("Ephemeral issue %s should not appear in ready work", spawnedID)
+			}
+		}
+	}
+}
+
+// TestCompoundMoleculeVisualization tests the compound molecule display in mol show
+func TestCompoundMoleculeVisualization(t *testing.T) {
+	// Test IsCompound() and GetConstituents()
+	tests := []struct {
+		name          string
+		bondedFrom    []types.BondRef
+		isCompound    bool
+		expectedCount int
+	}{
+		{
+			name:          "not a compound - no BondedFrom",
+			bondedFrom:    nil,
+			isCompound:    false,
+			expectedCount: 0,
+		},
+		{
+			name:          "not a compound - empty BondedFrom",
+			bondedFrom:    []types.BondRef{},
+			isCompound:    false,
+			expectedCount: 0,
+		},
+		{
+			name: "compound with one constituent",
+			bondedFrom: []types.BondRef{
+				{SourceID: "proto-a", BondType: types.BondTypeSequential},
+			},
+			isCompound:    true,
+			expectedCount: 1,
+		},
+		{
+			name: "compound with two constituents - sequential bond",
+			bondedFrom: []types.BondRef{
+				{SourceID: "proto-a", BondType: types.BondTypeSequential},
+				{SourceID: "proto-b", BondType: types.BondTypeSequential},
+			},
+			isCompound:    true,
+			expectedCount: 2,
+		},
+		{
+			name: "compound with parallel bond",
+			bondedFrom: []types.BondRef{
+				{SourceID: "proto-a", BondType: types.BondTypeParallel},
+				{SourceID: "proto-b", BondType: types.BondTypeParallel},
+			},
+			isCompound:    true,
+			expectedCount: 2,
+		},
+		{
+			name: "compound with bond point",
+			bondedFrom: []types.BondRef{
+				{SourceID: "proto-a", BondType: types.BondTypeSequential, BondPoint: "step-2"},
+			},
+			isCompound:    true,
+			expectedCount: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issue := &types.Issue{
+				ID:         "test-compound",
+				Title:      "Test Compound Molecule",
+				BondedFrom: tt.bondedFrom,
+			}
+
+			if got := issue.IsCompound(); got != tt.isCompound {
+				t.Errorf("IsCompound() = %v, want %v", got, tt.isCompound)
+			}
+
+			constituents := issue.GetConstituents()
+			if len(constituents) != tt.expectedCount {
+				t.Errorf("GetConstituents() returned %d items, want %d", len(constituents), tt.expectedCount)
+			}
+		})
+	}
+}
+
+// TestFormatBondType tests the formatBondType helper function
+func TestFormatBondType(t *testing.T) {
+	tests := []struct {
+		bondType string
+		expected string
+	}{
+		{types.BondTypeSequential, "sequential"},
+		{types.BondTypeParallel, "parallel"},
+		{types.BondTypeConditional, "on-failure"},
+		{types.BondTypeRoot, "root"},
+		{"", "default"},
+		{"custom-type", "custom-type"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.bondType, func(t *testing.T) {
+			if got := formatBondType(tt.bondType); got != tt.expected {
+				t.Errorf("formatBondType(%q) = %q, want %q", tt.bondType, got, tt.expected)
+			}
+		})
+	}
+}
+
+// TestPourRootTitleDescSubstitution verifies that the root molecule's title and description
+// are substituted with {{title}} and {{desc}} variables when pouring a formula.
+// This is a tracer bullet test for GitHub issue #852:
+// https://github.com/steveyegge/beads/issues/852
+func TestPourRootTitleDescSubstitution(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/test.db"
+	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
+	if err != nil {
+		t.Skipf("skipping: Dolt server not available: %v", err)
+	}
+	defer s.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", "mol"); err != nil {
+		t.Fatalf("Failed to set config: %v", err)
+	}
+
+	// Create a formula that has title and desc variables
+	f := &formula.Formula{
+		Formula:     "mol-task",
+		Description: "Standard task workflow for 2-8 hour work...",
+		Version:     1,
+		Type:        formula.TypeWorkflow,
+		Vars: map[string]*formula.VarDef{
+			"title": {
+				Description: "Task title",
+				Required:    true,
+			},
+			"desc": {
+				Description: "Task description",
+				Required:    false,
+				Default:     formula.StringPtr("No description provided"),
+			},
+		},
+		Steps: []*formula.Step{
+			{ID: "plan", Title: "Plan: {{title}}", Type: "task"},
+			{ID: "implement", Title: "Implement: {{title}}", Type: "task", DependsOn: []string{"plan"}},
+			{ID: "verify", Title: "Verify: {{title}}", Type: "task", DependsOn: []string{"implement"}},
+			{ID: "review", Title: "Review: {{title}}", Type: "task", DependsOn: []string{"verify"}},
+		},
+	}
+
+	// Cook the formula to a subgraph (in-memory, no DB)
+	subgraph, err := cookFormulaToSubgraphWithVars(f, f.Formula, f.Vars)
+	if err != nil {
+		t.Fatalf("Failed to cook formula: %v", err)
+	}
+
+	// Spawn with title and desc variables
+	vars := map[string]string{
+		"title": "My Task",
+		"desc":  "My description",
+	}
+
+	result, err := spawnMolecule(ctx, s, subgraph, vars, "", "test", false, types.IDPrefixMol)
+	if err != nil {
+		t.Fatalf("spawnMolecule failed: %v", err)
+	}
+
+	// Get the spawned root issue
+	spawnedRoot, err := s.GetIssue(ctx, result.NewEpicID)
+	if err != nil {
+		t.Fatalf("Failed to get spawned root: %v", err)
+	}
+
+	// BUG: The root title should contain "My Task" but currently contains "mol-task"
+	// because cookFormulaToSubgraph sets root.Title = f.Formula instead of using
+	// a template that includes {{title}}.
+	if !strings.Contains(spawnedRoot.Title, "My Task") {
+		t.Errorf("Root title should contain 'My Task' from variable substitution, got: %q", spawnedRoot.Title)
+	}
+
+	// BUG: The root description should contain "My description" but currently
+	// contains the formula's static description.
+	if !strings.Contains(spawnedRoot.Description, "My description") {
+		t.Errorf("Root description should contain 'My description' from variable substitution, got: %q", spawnedRoot.Description)
+	}
+
+	// Verify child beads DO have correct substitution (this should pass)
+	for oldID, newID := range result.IDMapping {
+		if oldID == f.Formula {
+			continue // Skip root
+		}
+		spawned, err := s.GetIssue(ctx, newID)
+		if err != nil {
+			t.Fatalf("Failed to get spawned issue %s: %v", newID, err)
+		}
+		if !strings.Contains(spawned.Title, "My Task") {
+			t.Errorf("Child issue %s (from %s) title should contain 'My Task', got: %q", newID, oldID, spawned.Title)
+		}
+	}
+}
+
+// TestPourRootTitleOnly verifies edge case: only title var defined, no desc.
+// Root should use {{title}} for title, but keep formula description.
+func TestPourRootTitleOnly(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/test.db"
+	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
+	if err != nil {
+		t.Skipf("skipping: Dolt server not available: %v", err)
+	}
+	defer s.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", "mol"); err != nil {
+		t.Fatalf("Failed to set config: %v", err)
+	}
+
+	// Formula with only title var (no desc)
+	f := &formula.Formula{
+		Formula:     "mol-simple",
+		Description: "Static description that should be preserved",
+		Version:     1,
+		Type:        formula.TypeWorkflow,
+		Vars: map[string]*formula.VarDef{
+			"title": {Description: "Task title", Required: true},
+		},
+		Steps: []*formula.Step{
+			{ID: "work", Title: "Do: {{title}}", Type: "task"},
+		},
+	}
+
+	subgraph, err := cookFormulaToSubgraphWithVars(f, f.Formula, f.Vars)
+	if err != nil {
+		t.Fatalf("Failed to cook formula: %v", err)
+	}
+
+	vars := map[string]string{"title": "Custom Title"}
+	result, err := spawnMolecule(ctx, s, subgraph, vars, "", "test", false, types.IDPrefixMol)
+	if err != nil {
+		t.Fatalf("spawnMolecule failed: %v", err)
+	}
+
+	spawnedRoot, err := s.GetIssue(ctx, result.NewEpicID)
+	if err != nil {
+		t.Fatalf("Failed to get spawned root: %v", err)
+	}
+
+	// Title should be substituted
+	if !strings.Contains(spawnedRoot.Title, "Custom Title") {
+		t.Errorf("Root title should contain 'Custom Title', got: %q", spawnedRoot.Title)
+	}
+
+	// Description should be the static formula description (no desc var)
+	if spawnedRoot.Description != "Static description that should be preserved" {
+		t.Errorf("Root description should be static formula desc, got: %q", spawnedRoot.Description)
+	}
+}
+
+// TestPourRootNoVars verifies backward compatibility: no title/desc vars defined.
+// Root should use formula name and formula description (original behavior).
+func TestPourRootNoVars(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/test.db"
+	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
+	if err != nil {
+		t.Skipf("skipping: Dolt server not available: %v", err)
+	}
+	defer s.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", "mol"); err != nil {
+		t.Fatalf("Failed to set config: %v", err)
+	}
+
+	// Formula with no title/desc vars (uses different var names)
+	f := &formula.Formula{
+		Formula:     "mol-release",
+		Description: "Release workflow for version bumps",
+		Version:     1,
+		Type:        formula.TypeWorkflow,
+		Vars: map[string]*formula.VarDef{
+			"version": {Description: "Version number", Required: true},
+		},
+		Steps: []*formula.Step{
+			{ID: "bump", Title: "Bump to {{version}}", Type: "task"},
+			{ID: "tag", Title: "Tag {{version}}", Type: "task", DependsOn: []string{"bump"}},
+		},
+	}
+
+	subgraph, err := cookFormulaToSubgraphWithVars(f, f.Formula, f.Vars)
+	if err != nil {
+		t.Fatalf("Failed to cook formula: %v", err)
+	}
+
+	vars := map[string]string{"version": "1.2.3"}
+	result, err := spawnMolecule(ctx, s, subgraph, vars, "", "test", false, types.IDPrefixMol)
+	if err != nil {
+		t.Fatalf("spawnMolecule failed: %v", err)
+	}
+
+	spawnedRoot, err := s.GetIssue(ctx, result.NewEpicID)
+	if err != nil {
+		t.Fatalf("Failed to get spawned root: %v", err)
+	}
+
+	// Title should be formula name (no title var defined)
+	if spawnedRoot.Title != "mol-release" {
+		t.Errorf("Root title should be formula name 'mol-release', got: %q", spawnedRoot.Title)
+	}
+
+	// Description should be formula description (no desc var defined)
+	if spawnedRoot.Description != "Release workflow for version bumps" {
+		t.Errorf("Root description should be formula desc, got: %q", spawnedRoot.Description)
 	}
 }

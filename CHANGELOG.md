@@ -7,21 +7,2868 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-04-15
+
+### Fixed
+
+- **npm publish: provenance validation** — `npm-package/package.json` `repository.url`, `bugs.url`, and `homepage` updated from `steveyegge/beads` to `gastownhall/beads` so that npm's sigstore provenance validator accepts the published artifact. The repo move in v1.0.0 left these URLs stale, which caused npm publishes for v1.0.0 and v1.0.1 to be rejected after provenance check (E422).
+
+## [1.0.1] - 2026-04-15
+
+### Added
+
+- **`bd batch`** — Atomic multi-operation transactions across create/update/close/dep. All ops commit together or none do. ([PR #3165](https://github.com/gastownhall/beads/pull/3165))
+- **`bd config drift` / `bd config apply`** — Detect and reconcile drift between yaml, git, and database config surfaces. ([PR #3086](https://github.com/gastownhall/beads/pull/3086))
+- **`bd config show`** — Unified provenance view showing where each effective config value comes from. ([PR #3084](https://github.com/gastownhall/beads/pull/3084), [bd-934](https://github.com/gastownhall/beads/issues/934))
+- **`started_at` on issues** — Timestamp recording when an issue first entered `in_progress`. ([PR #3206](https://github.com/gastownhall/beads/pull/3206), [GH#2796](https://github.com/gastownhall/beads/issues/2796))
+- **`beads_global` shared-server database** — Dedicated shared-server database for cross-project state. ([`fa87dd2b`](https://github.com/gastownhall/beads/commit/fa87dd2b))
+- **Pool metrics telemetry** — Shared-server connection pool metrics for diagnosing pool exhaustion. ([PR #3172](https://github.com/gastownhall/beads/pull/3172), [GH#3140](https://github.com/gastownhall/beads/issues/3140))
+- **`OpenBestAvailable` public API** — Library consumers can open the best available backend without hard-coding selection. ([PRs #3143, #3149](https://github.com/gastownhall/beads/pull/3149))
+- **Selective sync: `--issues` flag and `push`/`pull` subcommands** — Tracker sync accepts explicit issue ID lists; `--parent` ported across trackers. ([PR #2975](https://github.com/gastownhall/beads/pull/2975))
+- **`--label` / `--label-any` for `bd orphans`** — Filter orphan detection by label. ([PR #3026](https://github.com/gastownhall/beads/pull/3026))
+- **Cross-version smoke tests** — CI gate for upgrade compatibility across prior releases. ([GH#2968](https://github.com/gastownhall/beads/issues/2968))
+- **Migration test harness** — Cross-era upgrade fidelity tests. ([PR #3067](https://github.com/gastownhall/beads/pull/3067))
+- **Docusaurus versioning** — Site versioned per release; `llms-full.txt` aligned with snapshots. ([PR #3033](https://github.com/gastownhall/beads/pull/3033))
+- **Azure Blob Storage remotes** — `az://` recognized as a valid Dolt remote URL scheme. ([PR #3101](https://github.com/gastownhall/beads/pull/3101))
+- **Side-effect hints for `bd config set`/`unset`** — Shows what else changes when a config value is modified. ([PR #3089](https://github.com/gastownhall/beads/pull/3089))
+- **Dynamic config-list discovery** — `bd config list` auto-discovers yaml keys and env vars. ([PR #3088](https://github.com/gastownhall/beads/pull/3088))
+- **`BEADS_DOLT_READY_TIMEOUT`** — Override the 10s `waitForReady` timeout during `bd init --shared-server` for slower hardware. ([PR #3188](https://github.com/gastownhall/beads/pull/3188), [GH#3142](https://github.com/gastownhall/beads/issues/3142))
+
+### Changed
+
+- **Auto-export enabled by default** — `export.auto` defaults to `true` and the default `export.path` is now `issues.jsonl` (previously `export.jsonl`), with `export.git-add` on by default. `bd init` prompts interactively (default: keep enabled); `--non-interactive` keeps it enabled. All `export.*` keys are listed in `bd config --help`. ([PR #3204](https://github.com/gastownhall/beads/pull/3204), [GH#2973](https://github.com/gastownhall/beads/issues/2973))
+- **`gms_pure_go` by default** — Test and install helpers default to the pure-Go build tag, dropping ICU linkage from CI. ([PRs #3240, #3259](https://github.com/gastownhall/beads/pull/3259))
+- **ICU runtime dependency removed from release binaries** — Release builds no longer link ICU, fixing portability issues. ([PR #3066](https://github.com/gastownhall/beads/pull/3066))
+- **Dolt connection pool lifetime configurable** — Longer default, configurable via env. ([PR #3163](https://github.com/gastownhall/beads/pull/3163))
+- **Dolt connection TLS explicitly disabled** — When TLS is not configured, connections now explicitly opt out rather than depending on driver defaults. ([PR #3107](https://github.com/gastownhall/beads/pull/3107))
+- **Dolt log noise reduced** — `NewConnection` spam silenced; `dolt-server.log` rotates at startup to cap size. ([PRs #3160, #3161](https://github.com/gastownhall/beads/pull/3161))
+
+### Fixed
+
+- **Schema migration conflict** — Removed a conflicting column on the schema migration table; migration issue patched with test coverage. ([commits `f079786b`, `65dbdbf5`, `9aa9b82f`](https://github.com/gastownhall/beads/commits/main))
+- **Wisp tables missing after bootstrap clone** — `bd bootstrap` now ensures wisp tables exist after cloning. ([commit `31d51232`](https://github.com/gastownhall/beads/commit/31d51232))
+- **CI test binary timeout on macOS** — `bd` test binary memoized to avoid 10-minute timeout. ([PR #3273](https://github.com/gastownhall/beads/pull/3273))
+- **Local-only state moved to Dolt-ignored tables** — Prevents local state from polluting shared history. ([commit `50f715b1`](https://github.com/gastownhall/beads/commit/50f715b1))
+- **Worktree awareness across commands** — Hooks path, fingerprint, doctor checks, config validate, preflight, reset, bootstrap path synthesis, `rename-prefix`, `countExistingIssues`, and formula search paths all resolve correctly when run inside a git worktree. ([PRs #3169, #3123, #3235](https://github.com/gastownhall/beads/pull/3169), plus numerous smaller fixes)
+- **`bd bootstrap` hardening** — Commits `issue_prefix` to the config table; writes `metadata.json` and `config.yaml` after sync clone; uses parent workspace db name when local `.beads` missing; rejects empty `--database`; auto-start allowed for migration tests. ([PRs #3203, #3247, #3083, #3076](https://github.com/gastownhall/beads/pull/3247))
+- **Remote URL validation hardened at config parse time** — Security hardening for tracker and backup remotes. ([PR #3210](https://github.com/gastownhall/beads/pull/3210))
+- **`bd list` truncation hint in all output modes** — Truncation now indicated in JSON/compact/long formats. ([PR #3243](https://github.com/gastownhall/beads/pull/3243), [GH#3212](https://github.com/gastownhall/beads/issues/3212))
+- **`bd list --watch` hierarchy consistency** — Parent/child ordering stable across watch refreshes. ([PR #3236](https://github.com/gastownhall/beads/pull/3236))
+- **`bd update --defer` sets status=deferred** — Deferring an issue now transitions status correctly. ([PR #3241](https://github.com/gastownhall/beads/pull/3241), [GH#3233](https://github.com/gastownhall/beads/issues/3233))
+- **`bd mol bond` transitive cycle detection** — Cycles through transitive dependencies now caught. ([PR #3111](https://github.com/gastownhall/beads/pull/3111), [GH#2719](https://github.com/gastownhall/beads/issues/2719))
+- **`bd dep add/remove` allows cross-prefix targets** — No longer rejects dependencies that cross prefix boundaries. ([commit `7b02edda`](https://github.com/gastownhall/beads/commit/7b02edda))
+- **`bd dolt pull` nil-pointer panic in embedded mode** — Embedded backend no longer panics on pull. ([PR #3148](https://github.com/gastownhall/beads/pull/3148))
+- **Diverged-history guidance on auto-push failure** — Actionable recovery steps printed instead of raw error. ([PR #3138](https://github.com/gastownhall/beads/pull/3138))
+- **`bd config` error message hints** — Suggest `bd config set` (not `bd config`) in error messages. ([PR #3141](https://github.com/gastownhall/beads/pull/3141))
+- **JSONL export in pre-commit hook** — Atomic code+issues commits via pre-commit hook. ([PR #3121](https://github.com/gastownhall/beads/pull/3121))
+- **Auto-export / auto-backup errors surfaced to stderr** — Silent failures now visible. ([PR #3122](https://github.com/gastownhall/beads/pull/3122))
+- **`go install` on Windows** — Fixed ICU header dependency that broke `go install` on Windows. ([PR #3112](https://github.com/gastownhall/beads/pull/3112), [GH#3013](https://github.com/gastownhall/beads/issues/3013))
+- **Stepping-stone migration paths removed** — Unsupported intermediate migration versions cleaned up. ([PR #3110](https://github.com/gastownhall/beads/pull/3110))
+- **SQLite-era JSONL migration preserves dependencies and labels** — Migration from pre-Dolt exports no longer drops graph edges or labels. ([PR #3082](https://github.com/gastownhall/beads/pull/3082), [GH#3079](https://github.com/gastownhall/beads/issues/3079))
+- **MCP workspace discovery detects Dolt-backed projects** — MCP server no longer misses Dolt-native repos. ([PR #3207](https://github.com/gastownhall/beads/pull/3207), [GH#2997](https://github.com/gastownhall/beads/issues/2997))
+- **npm postinstall closes download streams** — Resource leak fixed. ([PR #3228](https://github.com/gastownhall/beads/pull/3228))
+- **Husky hooks sanitized when copied** — Husky-managed hooks no longer corrupt beads-managed hook directory. ([PR #3208](https://github.com/gastownhall/beads/pull/3208), [GH#3132](https://github.com/gastownhall/beads/issues/3132))
+- **GitLab issue link dependencies wired into sync pull** — Dependencies via GitLab links now import. ([PR #3202](https://github.com/gastownhall/beads/pull/3202), [GH#2645](https://github.com/gastownhall/beads/issues/2645))
+- **`.beads/` FS_NOCOW_FL on btrfs** — Prevents btrfs kworker thrashing on Dolt files. ([PR #3162](https://github.com/gastownhall/beads/pull/3162))
+- **Auto-commit config table writes** — `bd remember`, `bd forget`, and `bd config` commands now commit their writes. ([PR #3052](https://github.com/gastownhall/beads/pull/3052), [bd-g8p](https://github.com/gastownhall/beads/issues/g8p))
+- **Shared-server CLI dir resolved from shared root** — Corrects path resolution for shared-server layouts. ([PR #3223](https://github.com/gastownhall/beads/pull/3223))
+- **`.claude/` gitignore narrowed** — Blanket ignore replaced with specific patterns so project `.claude/` content is tracked. ([PR #3190](https://github.com/gastownhall/beads/pull/3190), [GH#3182](https://github.com/gastownhall/beads/issues/3182))
+- **Release archives extracting into subdirectory** — Install handles nested archive layouts. ([PR #3167](https://github.com/gastownhall/beads/pull/3167))
+- **`bd import` help text** — Removed references to nonexistent `-i` flag. ([PR #3200](https://github.com/gastownhall/beads/pull/3200))
+
+### Docs
+
+- **ADR-0001: multi-remote approach decision** ([PR #3209](https://github.com/gastownhall/beads/pull/3209))
+- **ICU regex policy / build dependency guidance** ([GH-3126](https://github.com/gastownhall/beads/issues/3126))
+- **Contributor protection policy for AI agents** ([PR #3151](https://github.com/gastownhall/beads/pull/3151))
+- **Cross-era migration instructions** ([PR #3081](https://github.com/gastownhall/beads/pull/3081))
+- **Unified quick-start (site + stub)** ([PR #3032](https://github.com/gastownhall/beads/pull/3032))
+- **Hosted docs link** ([PR #3011](https://github.com/gastownhall/beads/pull/3011))
+
+## [1.0.0] - 2026-04-02
+
+### 1.0 — Stable Release
+
+Beads 1.0 marks the transition from rapid iteration to production stability. The Dolt migration that began in v0.55.0 is complete: embedded Dolt is the default on all platforms, server lifecycle management is no longer required, and the critical reliability issues that affected the v0.55–v0.63 series have been resolved.
+
+### Added
+
+- **Embedded Dolt default on macOS** — Native CGO builds on macOS enable embedded Dolt by default, eliminating the external Dolt server entirely. ([PR #2971](https://github.com/steveyegge/beads/pull/2971))
+- **Custom status/type normalized tables** — `custom_statuses(name, category)` and `custom_types(name)` tables replace comma-separated config strings. Views use table-backed subqueries instead of dynamic IN clauses. Migration is automatic and idempotent. ([PR #2961](https://github.com/steveyegge/beads/pull/2961))
+- **`bd rules audit` and `bd rules compact`** — Scan `.claude/rules/*.md` for contradictions and near-duplicates; merge rule groups with deduplication. ([PR #2810](https://github.com/steveyegge/beads/pull/2810))
+- **`bd config set-many`** — Batch config operations across yaml, git, and database keys in a single command. ([PR #2943](https://github.com/steveyegge/beads/pull/2943))
+- **Credentials file support** — `~/.config/beads/credentials` for Dolt server passwords with Unix permission checks, env var override, and proper DSN escaping. ([PR #2854](https://github.com/steveyegge/beads/pull/2854))
+- **Spike, story, and milestone issue types** — First-class support with constants, validation, and normalization aliases. ([PR #2923](https://github.com/steveyegge/beads/pull/2923))
+- **GitLab sync: epic→milestone, task hierarchy, type filtering** — Epics sync as GitLab milestones, tasks create work items via GraphQL with parent hierarchy, internal types excluded from push by default. ([PR #2889](https://github.com/steveyegge/beads/pull/2889))
+- **ADO shorthand refs** — `ado:NNNNN` recognized in IsExternalRef and ExtractIdentifier, preventing duplicates on sync. ([PR #2966](https://github.com/steveyegge/beads/pull/2966))
+- **ADO push filters** — `--types`, `--states`, and `--no-create` flags now apply to push operations. ([PR #2944](https://github.com/steveyegge/beads/pull/2944))
+- **Public format package** — `format.PrettyIssue`, `CompactIssue`, `LongIssue` for external tooling. ([PR #2871](https://github.com/steveyegge/beads/pull/2871))
+- **SlotSet/SlotGet/SlotClear** — Per-issue metadata slots in the Storage interface for delegation tracking and hook state. ([PR #2870](https://github.com/steveyegge/beads/pull/2870))
+- **WispFilter export** — `beads.WispFilter` type alias exported from root package. ([PR #2868](https://github.com/steveyegge/beads/pull/2868))
+- **`--non-interactive` / `--yes` for bootstrap** — Skip confirmation prompts in CI/automation. ([PR #2942](https://github.com/steveyegge/beads/pull/2942))
+- **Batch dependency list** — `GetDependenciesWithMetadata` supports multiple issue IDs. ([PR #2875](https://github.com/steveyegge/beads/pull/2875))
+- **`bd ready --explain`** — Dependency-aware reasoning for why issues are or aren't ready. ([PR #2814](https://github.com/steveyegge/beads/pull/2814))
+- **Graph integrity enforcement** — Extended cycle detection and `bd graph check` command. ([PR #2814](https://github.com/steveyegge/beads/pull/2814))
+- **Tracker hardening** — Retry logic with jitter for all tracker HTTP clients, pagination guards for Linear/Jira, response size limits, terminal-safe content sanitization. ([PRs #2814](https://github.com/steveyegge/beads/pull/2814))
+- **Release stability gate** — Upgrade safety checks and breaking-change communication. ([GH#2951](https://github.com/steveyegge/beads/issues/2951))
+- **Hook firing in storage layer** — `HookFiringStore` decorator moves hook logic out of CLI layer. ([PR #2891](https://github.com/steveyegge/beads/pull/2891))
+
+### Changed
+
+- **`bd setup claude` defaults to project-local** — Settings written to `.claude/settings.json` (shared/team) by default; `--global` for user-level. Auto-runs during `bd init`. ([PR #2972](https://github.com/steveyegge/beads/pull/2972))
+- **`strconv.ParseBool` for env vars** — `IsAutoStartDisabled` uses standard boolean parsing with whitespace trimming. ([PRs #2955, #2956](https://github.com/steveyegge/beads/pull/2956))
+- **Comma-separated `--status` filter** — `bd list --status open,in_progress` now works. ([GH#2846](https://github.com/steveyegge/beads/issues/2846))
+- **Custom types from YAML** — `ResolveCustomTypesInTx` honors config.yaml custom types in create path. ([GH#2793](https://github.com/steveyegge/beads/issues/2793))
+- **lipgloss v2, backoff v5, goldmark 1.8.2** — Dependency updates.
+
+### Fixed
+
+- **Concurrent embedded Dolt panic** — Exclusive flock acquired on embedded store open, held for store lifetime. Second concurrent opener gets a clear error instead of a nil-pointer panic. ([GH#2571](https://github.com/steveyegge/beads/issues/2571))
+- **Spaces in repo path** — Embedded Dolt no longer URL-encodes local filesystem paths, fixing `%20` lookup failures on macOS. ([GH#2920](https://github.com/steveyegge/beads/issues/2920))
+- **Schema version bump** — `currentSchemaVersion` bumped to 11 for custom_statuses/custom_types migration. Prevents "table not found" errors on upgrade. ([GH#2974](https://github.com/steveyegge/beads/issues/2974))
+- **Dolt init failure** — Embedded-by-default eliminates server port 0 / connection refused issues for new users. ([GH#2656](https://github.com/steveyegge/beads/issues/2656))
+- **Bootstrap for missing database** — `bd bootstrap` probes server for actual database existence before declaring no-op. Recovery guidance updated across all error surfaces. ([PR #2940](https://github.com/steveyegge/beads/pull/2940))
+- **Diverged history recovery** — Dolt push/pull detect diverged history and print actionable recovery guidance. ([PR #2941](https://github.com/steveyegge/beads/pull/2941))
+- **No-db command routing** — `bd context`, `bd dolt show`, etc. honor `--db` flag, `BEADS_DB` env, and external `dolt_data_dir` layouts. ([PR #2844](https://github.com/steveyegge/beads/pull/2844))
+- **Auto-backup address conflict** — Detects when another backup remote owns the URL and syncs through it. ([PR #2927](https://github.com/steveyegge/beads/pull/2927))
+- **Shared server project_id** — `bd init --database` on a shared server adopts existing `_project_id` instead of generating a new one. ([PR #2925](https://github.com/steveyegge/beads/pull/2925))
+- **Init leaves beads.role unset** — Fixed edge cases where role was not persisted during init. ([GH#2950](https://github.com/steveyegge/beads/issues/2950))
+- **`--shared-server` mode detection** — Correctly treated as server mode for DoltMode resolution. ([PR #2947](https://github.com/steveyegge/beads/pull/2947))
+- **GitLab work_items URL dedup** — Pull dedup checks both issues and wisps tables; URL pattern matches `/work_items/` paths. ([PR #2889](https://github.com/steveyegge/beads/pull/2889))
+- **GitLab work item type ID** — Dynamic GraphQL query with per-session cache instead of hardcoded `gid://...`. ([Follow-up to PR #2889](https://github.com/steveyegge/beads/pull/2889))
+- **Stale noms LOCK files** — Cleaned after bootstrap clone. ([PR #2913](https://github.com/steveyegge/beads/pull/2913))
+- **ADO WIQL date precision** — RFC3339 timezone formatting in WIQL queries. ([PR #2911](https://github.com/steveyegge/beads/pull/2911))
+- **Blocked icon in `bd list`** — Dependency-blocked issues now show blocked indicator. ([GH#2858](https://github.com/steveyegge/beads/issues/2858))
+- **Installer ICU/CGO fallback** — Correct handling on systems without ICU libraries. ([PR #2965](https://github.com/steveyegge/beads/pull/2965))
+
+### Community
+
+Contributors: harry-miller-trimble, coffeegoddd, quad341, Bella-Giraffety, maphew, rjc123, Fredkr, sammywachtel, anupamchugh, ktoulgaridis, outdoorsea, Geargrindadmin.
+
+## [0.63.3] - 2026-03-30
+
+### Added
+
+- **Embedded mode by default** — New installations now use embedded Dolt as the default storage backend, eliminating the need to run a separate Dolt server process. Existing server-mode installations are unaffected. ([PR #2842](https://github.com/steveyegge/beads/pull/2842))
+- **`bd create --graph`** — Batch issue creation from a YAML/JSON dependency graph, replacing the standalone `bd graph-apply` command. ([PR #2894](https://github.com/steveyegge/beads/pull/2894))
+- **Multi-project/team sync** — Linear, Jira, and ADO integrations now support syncing multiple projects and teams in a single repo. ([PR #2868](https://github.com/steveyegge/beads/pull/2868))
+- **Notion sync** — Reimplemented Notion integration on REST data sources with full page property mapping. ([PR #2843](https://github.com/steveyegge/beads/pull/2843))
+- **GitLab sync** — Optional group-level GitLab issue sync. ([PR #2801](https://github.com/steveyegge/beads/pull/2801))
+- **Linear `--parent` flag** — `bd linear sync --parent` limits sync push to a specific ticket tree. ([PR #2853](https://github.com/steveyegge/beads/pull/2853))
+- **Remote URL support** — Multi-repo hydration now supports remote URLs. ([PR #2827](https://github.com/steveyegge/beads/pull/2827))
+- **Top-level command aliases** — `bd comment`, `bd assign`, `bd tag`, `bd link`, `bd priority` as convenient shortcuts. ([GH#2611](https://github.com/steveyegge/beads/issues/2611))
+- **Storage interface expansion** — `ListWisps`, `MergeSlot`, `ReopenIssue`, `UpdateIssueType`, replication, and VC interfaces now exposed in the public API. ([PRs #2782-#2788](https://github.com/steveyegge/beads/pull/2782))
+- **SearchIssues dependency hydration** — Bulk dependency population for search results. ([PR #2773](https://github.com/steveyegge/beads/pull/2773))
+- **`--agents-file` flag** — `bd init --agents-file` customizes the agent instructions filename. ([PR #2761](https://github.com/steveyegge/beads/pull/2761))
+- **Multi-process concurrency tests** — Server lifecycle and concurrent access integration tests. ([PR #2767](https://github.com/steveyegge/beads/pull/2767))
+
+### Changed
+
+- **Backup system simplified** — Removed git-based backup/restore (`backup export-git`, `backup fetch-git`). Backup and restore now operate exclusively through Dolt's native replication. ([PR #2842](https://github.com/steveyegge/beads/pull/2842))
+- **dolthub/driver v1.84.0** — Updated from v1.83.8, picking up serialization retry support.
+- **Dolt write retry** — `writeRetryTx` automatically retries on Dolt serialization errors. ([PR #2855](https://github.com/steveyegge/beads/pull/2855))
+- **CI overhaul** — Test sharding, precompiled binaries, shared Go module cache for faster CI runs.
+- **Gas Town terminology removed** — Remaining Gas Town naming removed from beads orchestrator detection. ([PR #2762](https://github.com/steveyegge/beads/pull/2762))
+- **TypeScript v6, backoff v5, goldmark 1.7.17** — Dependency updates.
+
+### Fixed
+
+- **Init git cache reset** — `bd init` now resets git caches after auto-init, preventing stale `.beads/dolt/` references in embedded mode. ([PR #2907](https://github.com/steveyegge/beads/pull/2907))
+- **Doctor embedded mode** — Improved embedded mode detection and push error guidance. ([PR #2910](https://github.com/steveyegge/beads/pull/2910))
+- **Create description warning** — Removed spurious description warning; test-issue warning now gated on DB size. ([PR #2908](https://github.com/steveyegge/beads/pull/2908))
+- **External contributor PRs** — `block-gh-watch` hook now allows external contributors to create PRs. ([PR #2907](https://github.com/steveyegge/beads/pull/2907))
+- **CWD `.beads/` priority** — `bd` now checks CWD for `.beads/` before git-worktree resolution, fixing worktree-based discovery in nested projects.
+- **Epic closure eligibility** — Wisp children now correctly included in epic closure checks. ([PR #2843](https://github.com/steveyegge/beads/pull/2843))
+- **Prefix routing** — `bd edit`, `bd reopen`, and `bd delete` now correctly route with prefixes from town root. ([PRs #2780, #2847](https://github.com/steveyegge/beads/pull/2847))
+- **ADO/Jira custom type_map** — Custom type maps no longer silently ignored. ADO dependency links now imported correctly. ([PR #2771](https://github.com/steveyegge/beads/pull/2771))
+- **Init safety guard** — `bd init --force` no longer bypasses close --quiet check. ([PR #2799](https://github.com/steveyegge/beads/pull/2799))
+- **Circuit breaker TTL** — Stale circuit breaker files cleaned during init; files moved to subdirectory. ([PR #2799](https://github.com/steveyegge/beads/pull/2799))
+- **`bd show --watch`** — Replaced fsnotify with polling to fix cross-platform compatibility. ([PR #2755](https://github.com/steveyegge/beads/pull/2755))
+- **Config unset routing** — `config unset` now routes to correct store; backup keys shown in list. ([GH#2727](https://github.com/steveyegge/beads/issues/2727))
+- **Doctor false errors** — Server health checks skipped when no Dolt server expected; bare worktree fallback fixed. ([GH#2722](https://github.com/steveyegge/beads/issues/2722))
+- **UTC timestamps** — ADO/Jira defer_until comparisons use UTC_TIMESTAMP(). ([PR #2819](https://github.com/steveyegge/beads/pull/2819))
+- **Cloud storage routing** — Push/pull routed through CLI when cloud storage env vars are set. ([GH#2820](https://github.com/steveyegge/beads/issues/2820))
+- **Embedded schema** — Removed HOP columns (crystallizes, quality_score) from embedded schema. ([PR #2837](https://github.com/steveyegge/beads/pull/2837))
+- **JSON path quoting** — Dotted metadata keys now properly quoted in JSON path expressions. ([PR #2865](https://github.com/steveyegge/beads/pull/2865))
+- **Hook fire on update** — `bd update --status closed` now fires on_close hook; `bd close` fires on_update. ([PR #2754](https://github.com/steveyegge/beads/pull/2754))
+
+### Embedded Dolt
+
+- **46 commits** from the Dolt team (coffeegoddd) completing embedded Dolt support: bootstrap, compact, migrate, sync, backup, restore, maintenance, setup, config, and advanced commands. Includes serialization retry, driver bump to v1.84.0, CI test sharding, and `RunInTransaction` refactor for shared `issueops` operations.
+
+### Community
+
+Contributors: coffeegoddd (Dustin Brown), matt wilkie (maphew), harry-miller-trimble, quad341, ktoulgaridis, eitsupi, renezander030, REMvisual, aphexcx, anupamchugh, MovGP0, Bella-Giraffety, julianknutsen, osamu2001, toumorokoshi, fernanja, sammywachtel, outdoorsea.
+
+## [0.62.0] - 2026-03-21
+
+### Added
+
+- **Custom status categories** — `bd config set status.custom "in_review:active,qa_testing:wip,archived:done,on_hold:frozen"` assigns categories to custom statuses that control behavior in `bd ready` (active statuses included) and `bd list` (done/frozen statuses excluded by default). Backward compatible — old flat format `"foo,bar"` still works with no behavior change. ([PR #2665](https://github.com/steveyegge/beads/pull/2665))
+- **`bd statuses` command** — Lists all built-in and custom statuses with their icons, categories, and descriptions. Supports `--json` for programmatic use.
+- **`bd note` command** — Shorthand for appending notes to issues without the `bd update --note` ceremony.
+- **Audit logging** — Status, assignee, and priority changes are logged to `.beads/interactions.jsonl` with close reasons. Survives Dolt GC flatten, so you can recover context after aggressive cleanup.
+- **`--exclude-type` flag** — `bd ready --exclude-type wisp` and `bd list --exclude-type wisp` filter issues by type.
+- **`--agents-profile` flag** — `bd init --agents-profile minimal` controls the default AGENTS.md profile (full/minimal).
+- **Memories in export/import** — `bd export`/`bd import` now round-trip agent memories.
+- **Azure DevOps integration** — New `bd ado` commands for syncing work items with Azure DevOps (`bd ado sync`, `bd ado status`, `bd ado projects`).
+- **MCP `ready` tool filter** — `issue_type` filter exposed on the MCP ready tool for agent use.
+- **Quality/lifecycle commands in prime** — `bd prime`, templates, and `bd doctor` now surface quality and lifecycle commands.
+
+### Changed
+
+- **BEADS_ACTOR replaces BD_ACTOR** — `BEADS_ACTOR` is now the primary environment variable for agent identity; `BD_ACTOR` remains as a deprecated fallback.
+- **ServerMode enum** — Dolt server ownership inference consolidated into a clean `ServerMode` enum (Auto, External, Shared, Embedded), replacing ad-hoc string checks.
+- **dolthub/driver v1.83.8** — Updated from v0.2.1, picking up Dolt engine improvements and bug fixes.
+- **anthropic-sdk-go v1.27.1** — Updated from v1.27.0.
+- **Internal cleanup** — Removed Gas Town-specific concepts from beads types and code: GUPP references, polecat/crew/overseer terminology, HOP fields, agent-as-bead subsystem, patrol molecule references, role templates, hardcoded `~/gt/` paths. Beads is now fully standalone.
+
+### Fixed
+
+- **Windows Dolt server lifecycle** — `ErrServerNotRunning` sentinel error prevents false "failed to stop" warnings; stale PID/port files cleaned up even when server is already dead. ([GH#2670](https://github.com/steveyegge/beads/issues/2670))
+- **Hook preservation** — `bd init` now preserves ALL pre-existing hooks (not just beads-managed ones) when overriding `core.hooksPath`. ([PR #2738](https://github.com/steveyegge/beads/pull/2738))
+- **Shim timeout** — Hook shim timeout increased from 30s to 300s, preventing premature termination of chained pre-commit pipelines (linters, formatters, type-checkers). Configurable via `BEADS_HOOK_TIMEOUT`. ([GH#2732](https://github.com/steveyegge/beads/issues/2732))
+- **GetNextChildIDTx query** — Replaced broken `CAST(SUBSTRING_INDEX(...) AS UNSIGNED)` with Go-side `ParseHierarchicalID`, fixing child ID reconciliation for non-numeric IDs after JSONL imports. ([GH#2721](https://github.com/steveyegge/beads/issues/2721))
+- **Credential key in .gitignore** — `.beads-credential-key` added to project-root `.gitignore` template as defense-in-depth for the AES-256 encryption key. ([GH#2695](https://github.com/steveyegge/beads/issues/2695))
+- **SQL stored procedures for flatten/compact** — `bd flatten` and `bd compact` now use SQL stored procedures in server mode, fixing failures on shared Dolt servers.
+- **`--format json` collision** — Resolved flag collision between `rootCmd` persistent `--format` flag and `list`/`dep-tree` local `--json` flags.
+- **Concurrent schema init** — `initSchemaOnDB` serialized with `GET_LOCK` to prevent Dolt journal corruption in multi-agent environments. ([GH#2672](https://github.com/steveyegge/beads/issues/2672))
+- **External Dolt server safety** — `KillStaleServers` respects `IsAutoStartDisabled` and server ownership, preventing accidental kills of externally-managed servers. ([GH#2641](https://github.com/steveyegge/beads/issues/2641))
+- **Doctor infinite restart loop** — Doctor no longer triggers infinite Dolt server restart cycles. ([GH#2636](https://github.com/steveyegge/beads/issues/2636))
+- **Schema version 8** — Dolt schema bumped to version 8 with proper commit of version update. ([PR #2635](https://github.com/steveyegge/beads/pull/2635))
+- **Repo-local servers** — Auto-started Dolt servers kept alive across sequential `bd` commands within the same repo.
+- **Store config preservation** — Reopening stores by path no longer drops repo-specific config. ([PR #2628](https://github.com/steveyegge/beads/pull/2628))
+- **Validation on close** — `--validate` now checks `--acceptance` field; `validation.on-close` config controls enforcement. ([PR #2654](https://github.com/steveyegge/beads/pull/2654))
+- **`.beads/.env` load order** — Environment file loaded before `noDbCommands` early return, fixing env-dependent non-DB commands. ([GH#2677](https://github.com/steveyegge/beads/issues/2677))
+- **Update description safety** — Empty stdin/file no longer silently erases descriptions; requires explicit opt-in.
+- **Bootstrap JSONL imports** — Correctly imports from git-tracked `.beads/issues.jsonl`.
+- **Doctor fail-closed** — Server-mode integrity recovery now fails closed instead of silently passing.
+
+### Embedded Dolt
+
+- **73 commits** from the Dolt team (coffeegoddd) advancing embedded Dolt support: create, list, update, close, show, delete, search, query, label, gate, promote, move, merge-slot, quick, diff, count, find-duplicates, graph, and views/reports commands now work in embedded mode. Includes shared `issueops` package extraction for transaction-based operations used by both server and embedded backends.
+
+### Community
+
+Contributors: coffeegoddd (Dustin Brown), matt wilkie (maphew), harry-miller-trimble, gzur, Algorune, sfncore, angelamayxie, paf0186, Patrick Farrell, Tim Visher.
+
+## [0.61.0] - 2026-03-15
+
+### Added
+
+- **`--no-history` flag** — `bd create --no-history` stores beads in the wisps table (skipping Dolt commits) without making them GC-eligible, fixing agent identity beads being incorrectly garbage collected. `bd update --no-history`/`--history` toggles the flag. ([GH#2619](https://github.com/steveyegge/beads/issues/2619))
+- **`--claim-next` flag** — `bd close --claim-next` auto-claims the next highest priority available issue after closing
+- **`--skills` and `--context` flags** — `bd create --skills`/`--context` add structured sections to issue descriptions
+- **`--exclude-type` for wisp GC** — `bd mol wisp gc --exclude-type agent,rig` protects specific types from garbage collection
+- **`--type` filter for wisp list** — `bd mol wisp list --type bug` filters by issue type
+- **Auto-detect beads database on git origin** — `bd bootstrap` probes origin for `refs/dolt/data` and auto-clones the database; `bd init` warns when existing data is detected ([GH#2580](https://github.com/steveyegge/beads/issues/2580))
+- **Install checksum verification** — install scripts verify SHA256 checksums before extraction ([GH#1857](https://github.com/steveyegge/beads/issues/1857))
+- **Jira `pull_jql` config** — `jira.pull_jql` config key or `JIRA_PULL_JQL` env var for custom JQL filters during issue fetch
+- **UUID primary keys** — events, comments, and snapshot tables migrated from AUTO_INCREMENT to UUID() primary keys for federation-safe multi-clone operation
+
+### Changed
+
+- **Prime SSOT** — `bd prime` is now the single source of truth for agent instructions. Agent files use versioned hash-based markers with profile support (full/minimal) for staleness detection and automatic upgrades. Symlink safety and profile precedence (full preserved over minimal) ([GH#2139](https://github.com/steveyegge/beads/issues/2139))
+- **Formula extends merges by ID** — child steps with matching IDs override parent steps in-place instead of appending duplicates
+- **Circuit breaker keyed on host:port** — prevents cross-host blocking when servers share a port
+- **Backup scoped by prefix** — backup export and restore filter by current project prefix, preventing cross-project data leakage on shared servers
+
+### Fixed
+
+- **Embedded Dolt CI** — clean stale noms LOCK files before opening embedded store (fixes TestEmbeddedInitConcurrent panic), update stale from_jsonl test, gofmt import.go
+- **Circuit breaker port-0 poisoning** — returns nil breaker for unresolved port 0 during standalone auto-start
+- **KillStaleServers scoped to repo** — only kills orphan Dolt processes belonging to the current repo's data directory
+- **Port resolution chain** — `applyConfigDefaults` consults port file > config.yaml > metadata.json instead of falling through to default 3307
+- **Doctor fingerprint checks** — `bd doctor /path/to/repo` computes fingerprints from the target path, not cwd
+- **Doctor auto-start on cold standalone** — doctor checks now use CLI auto-start policy instead of suppressing on explicit ports
+- **Doctor server-backed runtime detection** — layered detection for server-backed runtime on older metadata.json without `dolt_mode`
+- **Credential key location** — moved from `.beads/dolt/` to `.beads/` to avoid creating ghost directories in shared-server mode
+- **Colons in query values** — unquoted identifiers like `label=gt:merge-request` now work without quoting
+- **Init localhost warning** — warns when server host defaults to localhost for remote Dolt setups
+- **Repo-local Dolt server preservation** — stale cleanup preserves servers from other repos
+- **Backup restore UUID IDs** — accepts UUID-format comment and event IDs during restore
+
+## [0.60.0] - 2026-03-12
+
+### Added
+
+- **`bd bootstrap` with recovery actions** — `bd bootstrap` now executes recovery actions directly instead of just printing advice, making first-run and repair workflows hands-free ([GH#2438](https://github.com/steveyegge/beads/issues/2438), [GH#2372](https://github.com/steveyegge/beads/issues/2372))
+- **`bd context` command** — new command for safe-first error guidance, surfacing relevant context when things go wrong (fix-merge [PR #2496](https://github.com/steveyegge/beads/pull/2496))
+- **`bd help --list` and `bd help --doc`** — CLI doc generation flags for producing machine-readable command listings and full documentation ([GH#2527](https://github.com/steveyegge/beads/issues/2527))
+- **`bd done` alias** — `bd done` is now an alias for `bd close`, aligning with Gas Town's session lifecycle vocabulary
+- **`bd done <id> <message>`** — last argument is treated as the close reason, removing the need for `--comment`
+- **`--design-file` flag** — read design documents from files instead of stdin for `bd create` workflows ([PR #2524](https://github.com/steveyegge/beads/pull/2524))
+- **`--destroy-token` for safe re-init** — enables non-interactive `bd init` re-initialization with explicit confirmation token ([GH#2497](https://github.com/steveyegge/beads/issues/2497))
+- **GitHub Issues integration** — tracker plugin for syncing GitHub Issues with beads ([GH#2373](https://github.com/steveyegge/beads/issues/2373))
+- **Global PRIME.md fallback** — `~/.config/beads/PRIME.md` is used when no project-level PRIME.md exists ([GH#2330](https://github.com/steveyegge/beads/issues/2330))
+- **Shared Dolt server mode** — multi-repo and multi-agent setups can share a single Dolt server instance ([GH#2416](https://github.com/steveyegge/beads/issues/2416))
+- **Ephemeral port allocation for Dolt** — replaces hash-derived ports with OS-assigned ephemeral ports, eliminating port collisions entirely ([GH#2415](https://github.com/steveyegge/beads/issues/2415))
+- **Workspace identity preflight** — `bd bootstrap` validates workspace identity before any operations ([GH#2438](https://github.com/steveyegge/beads/issues/2438))
+- **Epic close guards** — prevents accidental closure of epics with open children; includes merge re-parenting and progress display
+- **`bd search` searches `external_ref`** — external references (GitHub issue URLs, Linear IDs, etc.) are now searchable ([GH#2494](https://github.com/steveyegge/beads/issues/2494))
+- **JSON-aware error output** — errors include structured JSON when `--json` is active, with JSONL schema validation and contract tests ([GH#2499](https://github.com/steveyegge/beads/issues/2499))
+- **`ai.api_key` config** — fallback for `ANTHROPIC_API_KEY` environment variable, stored in `config.yaml`
+- **Embedded Dolt storage interfaces** — new storage abstraction layer contributed by DoltHub (coffeegoddd) for future embedded Dolt work ([PR #2427](https://github.com/steveyegge/beads/pull/2427), [PR #2428](https://github.com/steveyegge/beads/pull/2428))
+- **Community tools** — added beads-web and claude-protocol to COMMUNITY_TOOLS.md; added community forks listing ([PR #2457](https://github.com/steveyegge/beads/pull/2457))
+
+### Changed
+
+- **Dolt port allocation** — switched from deterministic hash-derived ports to OS-assigned ephemeral ports; stored in repo-local state file rather than derived at runtime ([GH#2415](https://github.com/steveyegge/beads/issues/2415))
+- **Auto-push state moved to local file** — prevents metadata merge conflicts during `bd dolt pull` by keeping auto-push state out of the shared metadata ([GH#2466](https://github.com/steveyegge/beads/issues/2466))
+- **YAML config prefix precedence** — YAML config prefix now takes precedence over DB-stored prefix in shared-server mode ([GH#2469](https://github.com/steveyegge/beads/issues/2469))
+- **Charm library upgrades** — migrated glamour to v2 (`charm.land/glamour/v2`) and huh to v2 (`charm.land/huh/v2`) ([GH#2471](https://github.com/steveyegge/beads/issues/2471))
+- **Daemon infrastructure fully removed** — final cleanup of all remaining daemon references and idle monitor infrastructure ([GH#2431](https://github.com/steveyegge/beads/issues/2431), [GH#2452](https://github.com/steveyegge/beads/issues/2452))
+- **Dead sync mode scaffolding removed** — removed remaining sync mode code that was left behind after the Dolt migration ([GH#2485](https://github.com/steveyegge/beads/issues/2485))
+- **3-way merge engine remnants removed** — cleaned up leftover code from the removed 3-way merge system ([GH#2391](https://github.com/steveyegge/beads/issues/2391))
+- **Nix flake** — uses `go mod edit` instead of `sed` for version patching (more reliable)
+
+### Fixed
+
+- **Dolt journal corruption** — `KillStaleServers` now runs inside `flock` to prevent concurrent server kills from corrupting the Dolt journal ([GH#2430](https://github.com/steveyegge/beads/issues/2430))
+- **Dolt config corruption** — uses explicit `DOLT_ADD` to prevent config corruption from stale working set state ([GH#2455](https://github.com/steveyegge/beads/issues/2455))
+- **Dolt pull merge errors** — auto-commits pending changes before pull to prevent merge errors ([GH#2474](https://github.com/steveyegge/beads/issues/2474))
+- **Dolt pull transaction safety** — wraps `DOLT_PULL` in explicit transaction for autocommit compatibility ([GH#2501](https://github.com/steveyegge/beads/issues/2501))
+- **Dolt remote directory** — `bd dolt remote add/list/remove` now operate on the correct directory ([GH#2306](https://github.com/steveyegge/beads/issues/2306), [GH#2311](https://github.com/steveyegge/beads/issues/2311))
+- **Dolt endpoint drift** — warns when auto-started server endpoint doesn't match config ([GH#2399](https://github.com/steveyegge/beads/issues/2399))
+- **CLI remotes synced into SQL server** — CLI-managed remotes are now synced into the SQL server on store open ([GH#2315](https://github.com/steveyegge/beads/issues/2315))
+- **Server mode `.beads/` creation** — correctly creates `.beads/` directory when using external `BEADS_DOLT_*` env vars ([GH#2519](https://github.com/steveyegge/beads/issues/2519))
+- **Metadata merge conflicts** — auto-resolves metadata merge conflicts during `bd dolt pull` ([GH#2466](https://github.com/steveyegge/beads/issues/2466))
+- **Metadata replacement bug** — `--metadata` now merges with existing metadata instead of replacing it ([GH#2423](https://github.com/steveyegge/beads/issues/2423))
+- **Backup file detection** — detects backup files on database-not-found and after `bd init` ([GH#2327](https://github.com/steveyegge/beads/issues/2327))
+- **`bd export` crash** — fixed crash on zero-time timestamps and stale `bd sync` refs ([GH#2488](https://github.com/steveyegge/beads/issues/2488), [GH#2493](https://github.com/steveyegge/beads/issues/2493))
+- **`bd children`** — now includes closed children by default ([GH#2481](https://github.com/steveyegge/beads/issues/2481))
+- **`bd doctor --fix`** — regenerates missing `metadata.json` ([GH#2482](https://github.com/steveyegge/beads/issues/2482)); backfills `project_id` for pre-GH#2372 Dolt stores ([GH#2490](https://github.com/steveyegge/beads/issues/2490)); blocked at Gas Town town root to prevent accidental damage ([GH#2450](https://github.com/steveyegge/beads/issues/2450))
+- **`bd doctor`** — detects stale `.legacy` hook sidecars ([GH#2398](https://github.com/steveyegge/beads/issues/2398)); `--clean --json` now works correctly ([GH#2438](https://github.com/steveyegge/beads/issues/2438))
+- **`bd lint`** — accepts non-empty `acceptance_criteria` field without heading ([GH#2468](https://github.com/steveyegge/beads/issues/2468))
+- **`bd list --json`** — no longer ignored when `--tree` defaults to true (three separate fixes consolidated)
+- **`bd mol wisp`** — reports correct count when `RootOnly=true`
+- **`bd init`** — prevented from creating DB on another project's Dolt server ([GH#2336](https://github.com/steveyegge/beads/issues/2336)); init guard allows fresh clones with committed `metadata.json` ([GH#2433](https://github.com/steveyegge/beads/issues/2433)); `data-dir` blocked in server mode ([GH#2438](https://github.com/steveyegge/beads/issues/2438))
+- **Init guard error message** — removed dangerous `--force` suggestion
+- **JSONL backups** — preserve dependency metadata ([GH#2487](https://github.com/steveyegge/beads/issues/2487)); restore denormalized JSONL without data loss ([GH#2479](https://github.com/steveyegge/beads/issues/2479))
+- **Reparented children** — excluded from molecule auto-close ([GH#2480](https://github.com/steveyegge/beads/issues/2480))
+- **Worktree hooks** — use absolute path for `core.hooksPath` so hooks work in worktrees ([GH#2414](https://github.com/steveyegge/beads/issues/2414))
+- **Worktree `.gitignore`** — skip append when parent directory pattern already covers the entry
+- **Git hook shims** — added timeout and graceful DB-missing handling
+- **Stale lock files** — follow redirect target when cleaning stale lock files
+- **BEADS_DIR** — stabilized paths from detached commit worktrees; prefer stable branch worktrees
+- **`BEADS_DOLT_PORT` fallback** — added fallback in `GetDoltServerPort()` ([GH#2486](https://github.com/steveyegge/beads/issues/2486))
+- **PersistentPreRun flag checks** — use `Root().PersistentFlags()` for all persistent flag checks ([GH#2514](https://github.com/steveyegge/beads/issues/2514))
+- **Stale pinned flag** — auto-cleared on status transition
+- **Install script** — detects WSL and MINGW/MSYS/CYGWIN environments ([PR #2409](https://github.com/steveyegge/beads/pull/2409))
+- **Test stability** — Dolt test suite eliminates container crashes and cascading failures; timezone-aware date assertions; same-type issues for blocks dependency tests
+
+### Performance
+
+- **Close-time template subgraph loading** — significantly faster epic close operations ([GH#2458](https://github.com/steveyegge/beads/issues/2458))
+
+### Documentation
+
+- **Stale sync references purged** — comprehensive cleanup of `bd sync`, `bd import`, `--branch` refs across CLI help, setup generators, and docs ([GH#2522](https://github.com/steveyegge/beads/issues/2522), [GH#2435](https://github.com/steveyegge/beads/issues/2435), [GH#2442](https://github.com/steveyegge/beads/issues/2442))
+- **Stale migration ref fixed** — `bd migrate --to-dolt` references replaced with `bd init --from-jsonl` ([GH#2333](https://github.com/steveyegge/beads/issues/2333))
+- **QUICKSTART.md** — removed stale `--branch` flag and SQLite references ([GH#2522](https://github.com/steveyegge/beads/issues/2522))
+- **CI doc validation** — added CI check to catch stale documentation references
+- **Community tools** — added beads-web and claude-protocol
+
+### Dependencies
+
+- `github.com/dolthub/driver` updated (multiple digests)
+- `golang.org/x/sync` v0.20.0
+- `golang.org/x/sys` v0.42.0
+- `golang.org/x/term` v0.41.0
+- OpenTelemetry Go monorepo v1.42.0
+- Testcontainers Go monorepo v0.41.0
+- Charm glamour v1.0.0 → v2.0.0
+- Charm huh v0.8 → v2.0.0
+
+## [0.59.0] - 2026-03-05
+
+### Added
+
+- **`bd list --tree` default** — tree view is now the default display mode for `bd list` ([GH#2345](https://github.com/steveyegge/beads/issues/2345))
+- **OpenCode recipe** — `bd setup` now includes an OpenCode integration recipe
+- **Fresh clone detection** — `bd doctor` detects fresh clones on Dolt server and guides through init ([GH#2372](https://github.com/steveyegge/beads/issues/2372))
+- **Config-aware init guard** — `bd init` distinguishes server-reachable from DB-exists, with better error messages ([GH#2372](https://github.com/steveyegge/beads/issues/2372))
+- **Sync remote hint in errors** — database-not-found errors now surface `sync.git-remote` config for easier troubleshooting
+- **Nix flake modernization** — updated flake for nixpkgs-25.11, fix-merge of PR #2314
+- **Doctor warning suppression** — suppress specific `bd doctor` warnings via config ([GH#1095](https://github.com/steveyegge/beads/issues/1095))
+- **Community Tools** — added fancypantalons/nvim-beads to COMMUNITY_TOOLS.md
+
+### Changed
+
+- **3-way merge config removed** — `ConflictStrategy`, `FieldStrategy`, and all associated config/validation removed; Dolt handles merge natively ([GH#2353](https://github.com/steveyegge/beads/pull/2353))
+- **Daemon infrastructure removed** — the bd daemon has been fully removed; bd is now purely CLI-driven ([w-bd-001](https://github.com/steveyegge/beads/issues/w-bd-001))
+- **Legacy daemon lock infrastructure removed** — cleaned up stale lock files and related code
+- **Backup git-push defaults to OFF** — `bd backup` git push now requires explicit opt-in ([GH#2363](https://github.com/steveyegge/beads/issues/2363))
+- **Test infrastructure modernized** — migrated all tests from `StartTestDoltServer` to container-native API; readiness expanded to 5-state enum; crash detection via standalone functions ([GH#2304](https://github.com/steveyegge/beads/pull/2304))
+- **`ExtractPrefix` consolidated** — moved to `types` package for reuse across codebase
+
+### Fixed
+
+- **Hook marker handling** — `bd doctor --fix` repairs broken/orphaned hook markers; version added to END marker for future matching ([GH#2344](https://github.com/steveyegge/beads/issues/2344))
+- **Legacy hook migration** — warn on user-modified legacy hooks; handle backup sidecar files during migration
+- **Dolt push/pull directory** — use correct database subdirectory for CLI push/pull/fetch operations
+- **Contributor auto-routing** — add fallback routing for show/update/close commands ([GH#2345](https://github.com/steveyegge/beads/issues/2345))
+- **Config-aware prefix detection** — `ResolvePartialID` now respects config for prefix routing
+- **Doctor command order** — correct `enrichFreshClone` command sequencing
+- **Batch IN-clause queries** — prevent full table scans in all IN-clause queries ([GH#2294](https://github.com/steveyegge/beads/issues/2294))
+- **Init port resolution** — use `DefaultConfig` for port resolution during init ([GH#2372](https://github.com/steveyegge/beads/issues/2372))
+- **Idle monitor** — single-instance lock, port config isolation, project UUID verification ([GH#2367](https://github.com/steveyegge/beads/issues/2367), [GH#2372](https://github.com/steveyegge/beads/issues/2372))
+- **Init data safety** — prevent data destruction from misleading error messages ([GH#2363](https://github.com/steveyegge/beads/issues/2363), [GH#2372](https://github.com/steveyegge/beads/issues/2372))
+- **Circuit breaker tuning** — reduce cooldown to 5s and add active TCP health probe
+- **Deterministic ordering** — add ID tiebreaker to all ORDER BY clauses
+- **Backup on feature branches** — skip git commits during hook runs and on feature branches
+- **Backup config routing** — route `backup.*` keys to `config.yaml` so overrides are respected
+- **Embedded Dolt** — handle context canceled in cleanup, add SQL concurrency test
+- **Tombstone entries** — skip tombstone entries in `bd init --from-jsonl`
+- **DerivePort** — restore as standalone default in `DefaultConfig`; log fallback on collision
+- **Cross-type blocking** — align validation with cross-type blocking rules
+- **Cross-prefix dep routing** — extend to dep commands ([GH#2296](https://github.com/steveyegge/beads/pull/2296))
+- **Dolt serialization retry** — retry on serialization error in concurrent tests
+- **CLI routing** — gate on local remote availability; extend SQL push timeout ([GH#2295](https://github.com/steveyegge/beads/pull/2295))
+- **Docker Hub network calls** — skip when Dolt image not cached ([GH#2277](https://github.com/steveyegge/beads/issues/2277))
+- **Wisp batch deletes** — commit per batch in `deleteWispBatch` to avoid write timeout
+- **Idle monitor watchdog** — kills itself via `Stop()` to prevent zombie processes
+
+### Documentation
+
+- Audit and clean up stale sync mode documentation ([w-bd-004](https://github.com/steveyegge/beads/issues/w-bd-004))
+- Network/privacy section added to SECURITY.md
+- DerivePort birthday-problem collision recovery documented
+- Misleading examples corrected in QUICKSTART.md
+- GIT_INTEGRATION.md updated re deprecated beads-merge and Jujutsu
+- Circuit breaker and upgrade recovery troubleshooting docs
+- Duplicate nvim-beads entry fixed in COMMUNITY_TOOLS.md
+
+## [0.58.0] - 2026-03-02
+
+### Added
+
+- **Persistent agent memory** — `bd remember`, `bd memories`, `bd recall`, `bd forget` for knowledge that survives sessions and account rotations. Backed by the k/v store, auto-injected at `bd prime` time.
+- **`bd purge`** — delete closed ephemeral beads (wisps) to reclaim storage ([GH#1692](https://github.com/steveyegge/beads/issues/1692))
+- **`bd mol last-activity`** — show the most recent activity timestamp for any molecule ([GH#1456](https://github.com/steveyegge/beads/issues/1456))
+- **`bd show --current`** — show the active issue without specifying an ID ([GH#2184](https://github.com/steveyegge/beads/issues/2184))
+- **`bd doctor validate`** — Dolt-native conflict detection for data integrity checks ([GH#2249](https://github.com/steveyegge/beads/issues/2249))
+- **`bd init --backend`** — explicit backend selection with SQLite deprecation notice
+- **`--stdin` flag** — alias for `--body-file -` on `bd create` and `bd update`
+- **`bd preflight --check`** — aligned with CI checks for pre-push validation ([GH#2230](https://github.com/steveyegge/beads/issues/2230))
+- **gofmt + golangci-lint pre-commit hook** — automatic code quality enforcement ([GH#2179](https://github.com/steveyegge/beads/issues/2179))
+- **JSONL-to-Dolt migration script** — standalone bash script for pre-0.50 users ([GH#2276](https://github.com/steveyegge/beads/issues/2276))
+- **`bd doctor --fix`** — bridge pending hook migrations into automated repair
+- **`bd create-form --parent`** — create sub-issues with label inheritance
+
+### Fixed
+
+- **Dolt CPU spikes** — batch IN-clause queries in `dependencies.go` and `computeBlockedIDs` to prevent runaway CPU usage on large databases ([GH#2294](https://github.com/steveyegge/beads/issues/2294))
+- **Dolt joinIter hangs** — avoid hanging queries in `GetReadyWork` blocker computation
+- **Stealth mode backup push** — `no-git-ops` config now correctly prevents backup git push ([GH#2290](https://github.com/steveyegge/beads/issues/2290))
+- **Stale DB connection crash** — retry stale connection and preserve temp file in `bd edit` ([GH#2267](https://github.com/steveyegge/beads/issues/2267))
+- **OSC escape leaks** — prevent escape sequence pollution when third-party hook runners (lefthook, husky) call `bd hooks run` directly ([GH#1303](https://github.com/steveyegge/beads/issues/1303))
+- **`validateIssueIDPrefix`** — now checks `allowed_prefixes` config, unblocking convoy creation with multi-prefix databases ([GH#1179](https://github.com/steveyegge/beads/issues/1179))
+- **Molecule steps in `bd ready`** — remove stale SQLite-era filtering that hid mol steps ([GH#1359](https://github.com/steveyegge/beads/issues/1359))
+- **`bd blocked` children** — include children of blocked parents in output ([GH#1495](https://github.com/steveyegge/beads/issues/1495))
+- **Same-type blocking validation** — enforce that dependencies match allowed type pairs
+- **Cross-prefix dependency routing** — `bd dep add/rm/blocks/tree` now routes by prefix ([GH#2285](https://github.com/steveyegge/beads/pull/2285))
+- **Cross-prefix dep existence check** — skip target existence check for cross-prefix dependencies
+- **Wisps table recreation** — recreate `dolt_ignore`'d wisps tables on schema fast-path ([GH#2271](https://github.com/steveyegge/beads/issues/2271))
+- **Missing wisps table** — gracefully handle in epic/blocked queries ([GH#2271](https://github.com/steveyegge/beads/issues/2271))
+- **Wisp dependency scanning** — scan `wisp_dependencies` in `getChildrenOfIssues` and `getChildrenWithParents`
+- **Cascade-delete wisp children** — delete blocked step children during wisp GC
+- **Batch wisp deletes** — reduce Dolt commit pressure in `DeleteIssues`
+- **Dolt push/pull hint** — show helpful message when remote not found ([GH#2118](https://github.com/steveyegge/beads/issues/2118))
+- **Git-protocol remote fallback** — use CLI fallback for all git-protocol remotes, not just SSH ([GH#2268](https://github.com/steveyegge/beads/issues/2268))
+- **`dolt_data_dir` persistence** — strip absolute paths from `metadata.json` on save ([GH#2251](https://github.com/steveyegge/beads/issues/2251))
+- **Dolt config port** — consult `config.yaml` for `dolt.port` in `DefaultConfig` ([GH#2073](https://github.com/steveyegge/beads/issues/2073))
+- **Missing `dolt_database`** — detect and repair in `metadata.json` ([GH#2160](https://github.com/steveyegge/beads/issues/2160))
+- **Dolt remote guards** — guard remote subcommands against store init bypass ([GH#2224](https://github.com/steveyegge/beads/issues/2224))
+- **`bd search` performance** — avoid `LIKE %%` full-table scans
+- **Worktree DB discovery** — skip own `.beads/` in separate-DB discovery ([GH#2190](https://github.com/steveyegge/beads/issues/2190))
+- **Contributor routing** — detect fork workflow, apply routing to list and ready
+- **Pre-commit Go version mismatch** — detect before golangci-lint panics
+- **Viper defaults** — skip in `getRoutingConfigValue` to unblock DB fallback
+- **`bd mol wisp create`** — default to root-only unless formula sets `pour=true`
+- **Bare repo init** — skip `AGENTS.md` generation in bare repositories
+- **`last_import_time` refresh** — prevent false staleness after write commands ([GH#2255](https://github.com/steveyegge/beads/issues/2255))
+- **Hook marker detection** — validate marker count and order; recognize marker-managed hooks ([GH#2244](https://github.com/steveyegge/beads/issues/2244), [GH#2242](https://github.com/steveyegge/beads/issues/2242))
+- **Gitignore template** — add missing dolt runtime files ([GH#2256](https://github.com/steveyegge/beads/issues/2256))
+- **Pre-0.56 Dolt database upgrade** — graceful recovery path ([GH#2137](https://github.com/steveyegge/beads/issues/2137))
+- **Remotesapi port check** — skip when no federation peers configured ([GH#2273](https://github.com/steveyegge/beads/issues/2273))
+- **Doctor subsystem** — fix panics, masked errors, missing `rows.Err()`, federation port, hardcoded paths; add 3 new tests
+- **N+1 query patterns** — replace with batch queries in `deep.go` and `migration_validation.go`
+- **`IsBlocked` reporting** — align blocker reporting with blocked-cache semantics ([GH#1524](https://github.com/steveyegge/beads/issues/1524))
+
+### Removed
+
+- **Beads Classic SQLite backend** — the SQLite storage layer and all migration infrastructure have been removed. Dolt is the only backend. ([GH#87493ce](https://github.com/steveyegge/beads/commit/87493ce9))
+- **`go-sqlite3` dependency** — no more CGO requirement; tests use Dolt testcontainers
+- **Deprecated commands** — removed dead SQLite-era code and legacy scripts
+
+### Documentation
+
+- Updated stale references to JSONL and SQLite architecture
+- Hook migration preview/apply workflow documentation
+
+## [0.57.0] - 2026-03-01
+
+### Added
+
+- **`bd doctor --agent` mode** — AI agent diagnostics for automated health checks ([bd-6ud](https://github.com/steveyegge/beads/commit/8d5e3ef7))
+- **SSH push/pull fallback** — dual-surface remote management (SQL + CLI) with automatic SSH detection ([#2178](https://github.com/steveyegge/beads/pull/2178))
+- **Hook migration system** — census and migration planning for git hooks with doctor signal ([#2217](https://github.com/steveyegge/beads/pull/2221))
+- **Section markers for git hooks** — hooks now use section markers for safer updates ([GH#1380](https://github.com/steveyegge/beads/pull/2222))
+- **Auto-close molecule root** — molecule root automatically closes when all steps complete ([#2200](https://github.com/steveyegge/beads/issues/2200))
+- **CLI aliases** — `--comment` alias for `bd close`, `--yes/-y` alias for `bd mol burn`
+- **`bd backup` commands** — `init`, `sync`, and `restore` for Dolt-native backups
+- **JSONL backup & auto-backup** — `bd export` command for JSONL backup, auto-enable when git remote exists
+- **`bd gc`, `bd compact`, `bd flatten`** — standalone beads lifecycle management
+- **Circuit breaker** — Dolt server connection circuit breaker to prevent agent hangs
+- **Config-driven metadata schema** — enforcement via `metadata_schema` config ([GH#1416](https://github.com/steveyegge/beads/issues/1416))
+- **Metadata flags** — `--metadata` for `bd create`, `--set-metadata`/`--unset-metadata` for `bd update`, metadata filtering in `bd ready` ([GH#1406](https://github.com/steveyegge/beads/issues/1406))
+- **PreToolUse hook** — blocks interactive cp/mv/rm prompts in agent workflows
+- **Auto-update stale hooks** — `bd init` detects and updates outdated hooks ([GH#1466](https://github.com/steveyegge/beads/issues/1466))
+- **`--root-only` flag** — for `bd mol wisp create`
+- **`hk` support** — hk.jdx.dev as supported git hook manager ([#2182](https://github.com/steveyegge/beads/pull/2182))
+- **`bd dolt remote`** — add, list, remove subcommands for Dolt remote management
+- **Auto-push to Dolt remote** — automatic push with 5-minute debounce after Dolt commits
+- **`dolt-data-dir` config** — custom dolt data directory ([#2143](https://github.com/steveyegge/beads/pull/2143))
+- **`--database` flag for `bd init`** — configure existing server database ([#2102](https://github.com/steveyegge/beads/issues/2102))
+- **Per-worktree redirect** — `.beads/redirect` overrides main repo `.beads` ([#1995](https://github.com/steveyegge/beads/pull/1995))
+- **`has_metadata_key`** — new predicate in `bd query` DSL ([#1996](https://github.com/steveyegge/beads/pull/1996))
+- **MCP claim tool** — atomic start-work for MCP integrations ([#2071](https://github.com/steveyegge/beads/pull/2071))
+- **Auto-clean noms LOCK** — stale Dolt noms LOCK file cleanup on startup ([#2059](https://github.com/steveyegge/beads/issues/2059))
+- **Stale database detection** — in `bd doctor` and `bd dolt clean-databases`
+- **Self-managing Dolt server** — port collision fallback, idle monitor, crash watchdog for standalone users ([GH#2049](https://github.com/steveyegge/beads/issues/2049), [GH#2050](https://github.com/steveyegge/beads/issues/2050))
+- **`bd dolt start/stop`** — server lifecycle management commands
+- **Counter mode** — `issue_id_mode=counter` for sequential issue IDs ([#2013](https://github.com/steveyegge/beads/issues/2013))
+- **Auto-migration shim** — SQLite to Dolt migration via sqlite3 CLI
+- **Auto-migrate on first command** — SQLite to Dolt auto-migration on first `bd` command
+- **Linear Project sync** — sync Linear projects to beads ([#2022](https://github.com/steveyegge/beads/pull/2022))
+- **Label inheritance** — child issues inherit parent labels on creation
+- **Infra type routing** — route agent/rig/role/message beads to wisps table
+- **`IsInfraType` config-driven** — via `types.infra` config key
+- **`bd init --stealth`** — sets `no-git-ops: true` in config ([GH#2159](https://github.com/steveyegge/beads/issues/2159))
+- **Staleness check** — read-only commands validate against JSONL freshness
+- **CLI feedback titles** — command feedback now shows issue titles ([GH#1384](https://github.com/steveyegge/beads/issues/1384))
+- **OTel design docs** — OpenTelemetry architecture and data model documentation ([#2195](https://github.com/steveyegge/beads/pull/2195))
+- **Jira V2 API** — support for Jira V2 API ([#2088](https://github.com/steveyegge/beads/pull/2088))
+
+### Fixed
+
+- **Shadow database prevention** — `bd` no longer runs `CREATE DATABASE IF NOT EXISTS` unconditionally; errors with clear diagnostic instead of creating shadow databases
+- **Auto-start suppressed with explicit server port** — prevents shadow database creation when configured server is temporarily down
+- **Phantom catalog entries** — respect existing `dolt_database` config in init and migrate paths ([#2051](https://github.com/steveyegge/beads/issues/2051))
+- **`information_schema` resilience** — replace with `SHOW COLUMNS`/`SHOW TABLES` to avoid stale catalog crashes
+- **`bd doctor --server`** — fix crash on phantom entries
+- **Reparented child display** — reparented child no longer appears under old parent ([#2001](https://github.com/steveyegge/beads/pull/2001))
+- **Homebrew publishing** — use `brews` instead of `homebrew_casks` for formula publishing; auto-publish tap on release
+- **NULL `created_by` crash** — handle NULL in issue scan to prevent `bd duplicates` crash ([#2198](https://github.com/steveyegge/beads/pull/2198))
+- **Dolt UNION crash** — avoid `SELECT * UNION` that crashes Dolt on column count mismatch
+- **`SHOW DATABASES LIKE`** — replace with exact-match iteration for Dolt compatibility
+- **Dolt port resolution** — doctor checks and all commands use hash-derived port instead of hardcoded 3307 ([#2148](https://github.com/steveyegge/beads/pull/2148))
+- **`dolt_data_dir` respect** — doctor checks use configured data directory ([#2181](https://github.com/steveyegge/beads/pull/2181))
+- **Wisps table defaults** — add default values to NOT NULL TEXT columns ([bd-5nn](https://github.com/steveyegge/beads/commit/f489463b))
+- **AUTO_INCREMENT reset** — reset counters after `DOLT_PULL` ([#2135](https://github.com/steveyegge/beads/pull/2135))
+- **`bd init --stealth`** — correctly sets `no-git-ops: true` in config ([GH#2159](https://github.com/steveyegge/beads/issues/2159))
+- **Skip autopush on read-only** — prevent writes on read-only commands ([GH#2191](https://github.com/steveyegge/beads/pull/2215))
+- **Sandbox guard** — restore sandbox guard in `maybeAutoPush` ([#2192](https://github.com/steveyegge/beads/pull/2210))
+- **Mol notes field** — propagate notes field from formula steps to issues ([#2155](https://github.com/steveyegge/beads/pull/2211))
+- **Graph children layer** — lift children to parent's layer in graph layout ([GH#1748](https://github.com/steveyegge/beads/pull/2208))
+- **DefaultInfraTypes mutation** — unexport to prevent inconsistency ([#2193](https://github.com/steveyegge/beads/pull/2209))
+- **Conditional-blocks readiness** — evaluate conditional-blocks deps in `computeBlockedIDs()` ([#2128](https://github.com/steveyegge/beads/pull/2128))
+- **Dolt connection timeouts** — prevent agent hangs with connection timeouts
+- **Migration safety** — verify DB target, deduplicate, spot-check data during migration ([#2156](https://github.com/steveyegge/beads/issues/2156))
+- **Ephemeral read-path fallback** — fall through to issues table when wisps table missing ([#2161](https://github.com/steveyegge/beads/pull/2161))
+- **Ephemeral explicit-ID lookup** — complete routing across all storage layers ([GH#2053](https://github.com/steveyegge/beads/issues/2053))
+- **`waits-for` deps in `bd blocked`** — include in output ([GH#2043](https://github.com/steveyegge/beads/issues/2043))
+- **Reopen/undefer no-op status** — report correct status ([GH#2037](https://github.com/steveyegge/beads/issues/2037))
+- **Post-create metadata** — commit deps and labels to Dolt after create ([GH#2009](https://github.com/steveyegge/beads/issues/2009))
+- **Status validation** — validate against built-in + custom statuses on update ([#2021](https://github.com/steveyegge/beads/issues/2021))
+- **Empty title/label rejection** — reject on update/label add ([GH#1994](https://github.com/steveyegge/beads/issues/1994))
+- **Non-zero exit on failure** — exit non-zero when all close/update attempts fail ([GH#2014](https://github.com/steveyegge/beads/issues/2014))
+- **JSON metadata validation** — validate on creation path ([#2032](https://github.com/steveyegge/beads/issues/2032))
+- **Wisp field validation** — parity with issues in `createWisp` ([#2032](https://github.com/steveyegge/beads/issues/2032))
+- **Empty comment rejection** — reject whitespace-only comment text
+- **`bd stale` validation** — reject non-positive `--days` flag
+- **`bd defer` past date warning** — warn when `--until` date is in the past
+- **Doctor non-git-repo** — gracefully handle in fingerprint and role checks
+- **Doctor cruft cleaning** — clean cruft in redirect-expected dirs without redirect file ([#2194](https://github.com/steveyegge/beads/pull/2194))
+- **Doctor gitignore** — follow redirect when fixing outdated `.beads/.gitignore` ([#2078](https://github.com/steveyegge/beads/pull/2078))
+- **Doctor maintenance** — migrate maintenance checks to Dolt ([#2146](https://github.com/steveyegge/beads/pull/2146))
+- **Dolt server management** — Gas Town guardrails, one server per town, kill-before-start ([#2089](https://github.com/steveyegge/beads/issues/2089))
+- **Migration 007 resilience** — handle schema evolution differences ([#2168](https://github.com/steveyegge/beads/pull/2168))
+- **Windows compatibility** — Makefile ldflags fix, connectex syscall handling, doltserver filesystem heuristic ([#2165](https://github.com/steveyegge/beads/pull/2165), [#2171](https://github.com/steveyegge/beads/pull/2171), [#2092](https://github.com/steveyegge/beads/pull/2092))
+- **Batch SQL queries** — prevent query explosion with IN-clause batching ([#2108](https://github.com/steveyegge/beads/pull/2108))
+- **Routing write divergence** — check local store before prefix routing ([#2106](https://github.com/steveyegge/beads/pull/2106))
+- **Hook outdated detection** — unify between `CheckGitHooks` and `hooksNeedUpdate` ([#2105](https://github.com/steveyegge/beads/pull/2105))
+- **Linear status sync** — include `stateId` in push updates ([#2144](https://github.com/steveyegge/beads/pull/2144))
+- **Dep type overwrites** — prevent silent dependency type overwrites on dep add
+- **Prefix sanitization** — sanitize hyphens to underscores for SQL database names ([GH#2142](https://github.com/steveyegge/beads/issues/2142))
+- **Issue prefix normalization** — prevent double-hyphen bead IDs
+- **SQLite `#` in URI paths** — escape to prevent truncation ([#2150](https://github.com/steveyegge/beads/pull/2150))
+- **`bd dep` traversal** — traverse blocks-type edges in dep tree and graph commands ([#2151](https://github.com/steveyegge/beads/pull/2151))
+- **`bd dolt push/pull/commit`** — allow to initialize store ([GH#2042](https://github.com/steveyegge/beads/issues/2042))
+- **`bd init --from-jsonl`** — restore for server mode
+- **Doctor stale verification** — improved verification after --fix ([#2077](https://github.com/steveyegge/beads/pull/2077))
+- **Upsert on insert** — prevent duplicate primary key errors ([GH#2061](https://github.com/steveyegge/beads/issues/2061))
+- **Database version auto-migrate** — auto-migrate on CLI upgrade for all commands
+- **Wisp double-prefixing** — stop wisp ID double-prefixing and add wisp fallback to `ResolvePartialID`
+- **Dolt `DOLT_COMMIT` transaction** — commit SQL tx before `DOLT_COMMIT` to persist wisp data
+- **OSC escape leaks** — prevent in git hooks ([GH#1303](https://github.com/steveyegge/beads/issues/1303))
+- **`bd ready --json`** — include labels, deps, and parent in output
+- **Git upstream warning** — suppress for repos with no remotes ([#2116](https://github.com/steveyegge/beads/pull/2116))
+- **`bd` init prefix sanitization** — sanitize auto-detected prefix for MySQL database names
+- **Rejected flag-like args** — reject flag-like positional args in `bd create`
+- **Backup streaming** — stream backup exports to disk, reduce allocations
+- **Version scripts** — update for section markers, suppress unused param lint
+
+### Performance
+
+- **Test parallelization** — Dolt storage tests 3.5x faster, protocol tests 3x faster
+- **Branch-per-test isolation** — shared DB with branch-per-test for doctor (44s → ~12s), cmd/bd, and protocol tests
+- **Testcontainers migration** — test Dolt server uses testcontainers instead of binary spawning
+- **Consolidated test suites** — messaging and dep test suites merged for efficiency
+- Add phantom catalog detection to `bd doctor`
+- Fix `bd doctor --server` crash on phantom entries (replace `INFORMATION_SCHEMA.SCHEMATA` with `SHOW DATABASES`)
+
+## [0.56.1] - 2026-02-23
+
+### Fixed
+
+- **Release CI** — remove `verify-cgo.sh` post-hook from darwin and freebsd builds which intentionally use `CGO_ENABLED=0` (cross-compilation without CGO)
+
+## [0.56.0] - 2026-02-23
+
+### Removed
+
+- **Embedded Dolt mode** — beads now requires a running Dolt SQL server. The embedded Dolt driver (`dolthub/driver`) and all CGO build-tag bifurcation have been removed. Binary size drops from 168MB to ~41MB. Use `bd dolt start` or `dolt sql-server` to run the server.
+- **SQLite ephemeral store** — ephemeral issues (wisps) now live in Dolt-backed `wisps` table with `dolt_ignore`, replacing the separate SQLite database. Run `bd migrate wisps` to migrate existing data.
+- **JSONL sync pipeline** — the entire JSONL-based sync system (`bd sync`, git-portable mode, belt-and-suspenders mode) has been removed. Dolt-native push/pull via git remotes is the only sync mechanism. `bd sync` is now a deprecated no-op.
+- **JSONL bootstrap** — clone initialization uses Dolt clone only; JSONL bootstrap path removed.
+- **JSONL plumbing** — cross-rig JSONL flush, JSONL recovery in doctor, and JSONL-based restore have been removed.
+
+### Added
+
+- **Metadata query support** — `bd list`, `bd search`, and `bd query` now support `--metadata-field key=value` and `has_metadata_key` filters (#1908)
+- **Metadata visibility** — `bd show` and `bd list --long` display metadata in human-readable format (#1905)
+- **Wisps table** — ephemeral issues stored in dedicated Dolt-backed table with `dolt_ignore` for compaction-friendly lifecycle
+- **`bd migrate wisps`** — migration command for SQLite-to-Dolt ephemeral data
+- **Batch auto-commit mode** — reduces Dolt commit bloat by batching writes with SIGTERM/SIGHUP flush
+- **`--agents-template` flag** — `bd init` now supports named AGENTS.md templates via `embed.FS`
+- **Mux setup recipe** — `bd setup mux` with layered AGENTS.md and managed hooks
+- **Standalone formula execution** — `bd mol wisp` supports expansion formulas (#1903)
+- **Sentinel errors** — `ErrNotFound`, `ErrNotInitialized`, `ErrPrefixMismatch` for cleaner error handling
+- **`--skip-prefix-validation`** — `bd import` flag for legacy data migration
+- **Protocol invariant test suite** — data integrity and blocking semantics regression tests (#1910)
+- **OpenTelemetry instrumentation** — opt-in OTLP tracing for hooks and storage operations (#1940)
+- **Transaction infrastructure** — `RunInTransaction` with commit messages, isolation, retry, and batch wrapping for Dolt concurrency
+
+### Fixed
+
+- **`bd ready` ordering** — respect SortPolicy and preserve result ordering (#1883)
+- **`waits-for` readiness** — `bd ready` and molecule analysis now correctly handle `waits-for` dependencies (#1900)
+- **Dependency tree parent ID** — populate ParentID in tree output and show [BLOCKED] for root (#1992)
+- **Parent-child display** — `bd list` now separates parent-child deps from blocking deps (#1948)
+- **Hook shim templates** — use `bd hooks run` instead of nonexistent `bd hook` command
+- **Cross-expansion dependencies** — `bd mol cook` propagates deps across formula expansions (#1901)
+- **Wisp auto-close** — wisp root automatically closes after squash (#1898)
+- **Dolt server writes** — commit via `execContext` when server runs with `--no-auto-commit`
+- **Metadata normalization** — normalize metadata and waiters in `UpdateIssue`
+- **Batch import** — persist labels, comments, and deps during import
+- **Noms LOCK detection** — use `flock` probe instead of file existence (#1960)
+- **Doctor backend awareness** — deep validation checks configured backend, not directory presence
+- **Doctor federation** — use configured database name in federation and health checks (#1904, #1924, #1925)
+- **Doctor orphan deps** — exclude `external:` deps from orphan check (#1593)
+- **Jira sync** — use correct API v3 `/search/jql` endpoint (#1953)
+- **Plugin dep order** — correct inverted `bd dep add` argument order in plugin docs (#1928)
+- **Wisp routing** — fix multiple ephemeral store routing gaps for create, read, promote, and gc
+- **Prime output** — remove stale `--from-main` flag reference
+- **`bd list` resolved blockers** — treat missing/unreachable blockers as resolved (#1884)
+- **Wisp search parity** — add ~15 missing filter fields to `searchWisps`
+- **Wisp label hydration** — hydrate labels in `getWispsByIDs` for search results
+- **Query nil guard** — prevent panic in `GetBlockedIssues` and `GetEpicsEligibleForClosure`
+- **Issue prefix clobber** — guard `SetConfig` to prevent overwrite when rigs share a Dolt database
+- **Atomic bond/squash** — `bd mol bond`, `bd mol squash`, and `bd mol cook` now run in single transactions (bd-wvplu, bd-4kgbq)
+- **`bd ready` parent filter** — pass `--parent` filter to `GetReadyWork`/`GetBlockedIssues` and propagate blocked status to children (#2009, #1495)
+- **`bd list` sort/limit** — `--limit` now applies after `--sort`; trim whitespace in `bd edit` (#1237, #1234)
+- **Doctor lock false positive** — use `flock` probe for noms LOCK, remove stale `bd sync` references (#1981, #2007)
+- **Repo sync consistency** — cross-prefix hydration and close guard consistency (#1945, #1524)
+- **DOLT_COMMIT in CRUD** — all write operations now produce Dolt commits for history tracking
+- **Double JSON encoding** — fix daemon-mode RPC response unmarshaling across show, dep, label, reopen (bd-4ec8)
+- **G304 gosec finding** — annotate `os.ReadFile` in tips.go with `#nosec` for constructed paths (bd-8g8)
+- **Stale daemon references** — remove obsolete `bd daemon` references from all documentation (#1982)
+
+### Performance
+
+- **Binary size** — 168MB → ~41MB (dropped `dolthub/driver` and wazero WASM runtime)
+- **Linux/Windows startup** — eliminated 2-second wazero JIT compilation penalty on every invocation
+- **Test suite** — doctor tests 89s → 28s; shared DB pattern across cmd/bd suites
+- **Test isolation** — dolt package and cmd/bd tests now isolated from production Dolt server (bd-2lf6)
+- **N+1 queries** — batch dependency/label/comment queries with per-invocation caching (#1874)
+
+## [0.55.4] - 2026-02-20
+
+### Fixed
+
+- **Release CI: FreeBSD build** — disable CGO for FreeBSD target; zig sysroot lacks stdlib.h
+
+## [0.55.3] - 2026-02-20
+
+### Fixed
+
+- **Release CI: macOS builds** — disable CGO for darwin targets; zig sysroot lacks macOS frameworks (CoreFoundation, Security) and libresolv; pure-Go build via `gms_pure_go` + `netgo` tags
+
+## [0.55.2] - 2026-02-20
+
+### Fixed
+
+- **Release CI: libresolv** — strip `-lresolv` entirely from zig wrappers instead of replacing with `-lresolv.9` (zig sysroot has neither); macOS builds use `netgo` tag so libresolv is not needed
+- **Release formula** — added rate limit warnings to prevent burning GitHub API quota during CI wait
+
+## [0.55.1] - 2026-02-20
+
+### Fixed
+
+- **Release workflow YAML** — heredoc in zig wrapper step broke YAML literal block parsing; replaced with echo commands
+- **Version consistency** — marketplace.json was not bumped in v0.55.0
+- **Go formatting** — ran gofmt on 8 files
+- **Lint** — fixed unused parameter and dead code in config.go
+
+## [0.55.0] - 2026-02-20
+
+### Fixed
+
+- **Release CI: zig upgrade** — upgrade zig 0.13.0 → 0.14.0 to fix `AccessDenied` bug in cross-compilation (ziglang/zig#20689)
+- **Release CI: macOS libresolv** — work around zig 0.14.0 `libresolv` resolution by using versioned `-lresolv.9` (ziglang/zig#16674)
+- **Release CI: Android ARM64** — disable CGO for Android target (server mode only)
+- **5 pre-existing test failures** — resolve test failures and Dolt panic (bd-iqsw6v)
+- **Doctor daemon references** — remove daemon references for post-daemon architecture
+
+### Removed
+
+- **~5K lines dead code** — classic cleanup of obsolete sync pipeline remnants
+
+## [0.54.0] - 2026-02-18
+
+### Fixed
+
+- **Release CI** — fix zig cross-compilation cache race by serializing goreleaser builds (`--parallelism 1`)
+- **Android ARM64 build** — disable CGO for Android target (server mode only)
+- **`.zig-cache/` in `.gitignore`** — prevent goreleaser dirty-git false positive
+
+## [0.53.0] - 2026-02-18
+
+### Added
+
+- **Dolt-in-Git sync** — native Dolt push/pull via git remotes replaces the entire JSONL sync pipeline; `BootstrapFromGitRemote()`, `HasRemote()`, `sync.git-remote` config key
+- **`bd dolt start` / `bd dolt stop`** — explicit Dolt server management commands (#1813)
+- **`bd dolt commit`** — desire-path ergonomics for committing Dolt data (#1812)
+- **Server mode without CGO** — `OpenFromConfig()` exported for server-mode aware store opening (#1805)
+- **Hosted Dolt support** — TLS, authentication, and explicit branch configuration
+- **`bd mol wisp gc --closed`** — bulk purge of closed wisps
+- **`--no-parent` flag for `bd list`** — filter out child issues
+- **`bd ready` pretty format** — improved default output with priority sort, truncation footer, and parent epic context
+- **Dolt compaction methods** — `bd compact` support for Dolt databases
+- **Storage interface** — `Storage` interface decouples from concrete `DoltStore` (bd-l3o)
+- **Lock health diagnostics** — `bd doctor` detects and reports dolt-access.lock and noms LOCK issues
+- **Codecov integration** — component-based coverage tracking in CI
+
+### Fixed
+
+- **Pre-commit deadlock on embedded Dolt** — resolve hook deadlock (#1841, #1843)
+- **`bd doctor --fix` hang** — run fixes in-process instead of spawning subprocess (#1850)
+- **Dolt lock errors** — surface lock errors with actionable guidance instead of silent empty results (#1816)
+- **`BEADS_DIR` config loading** — respect `BEADS_DIR` when loading config.yaml (#1854)
+- **Dolt `Unknown database` retry** — retry on `Unknown database` after `CREATE DATABASE` (#1851, #1852)
+- **Windows `Expand-Archive`** — qualify to avoid Pscx module conflict (#1826)
+- **`bd init` git repo check** — ensures git repo exists and runs clean diagnostics
+- **`SaveConfigValue`** — preserves existing file contents (#1816)
+- **`molecule` core type** — treat molecule as core issue type (#1866)
+- **Formula `VarDef`** — distinguish "no default" from `default=""` (#1837)
+- **Worktree test isolation** — harden metadata.json isolation (bd-la2cl)
+- **Goroutine leak** — replace `time.Sleep` with `waitFor` in tests (#1822)
+
+### Removed
+
+- **JSONL sync-branch pipeline** — deleted `internal/syncbranch/` (5,720 lines), `snapshot_manager`, `deletion_tracking`, doctor sync-branch checks/fixes, and all associated tests (~11,000 lines total)
+- **Daemon infrastructure** — removed lockfile activity signal and orchestrator (bd-9u8zd)
+- **3-way merge engine remnants** — removed remaining merge code (bd-aswyy)
+- **Dead stubs** — `CheckBackendMigration`, `NeedsJSONL`, and other no-ops (bd-23nlq)
+- **Dead SQLite-only `bd repair` command**
+
+### Documentation
+
+- **BeadHub** — added to COMMUNITY_TOOLS.md
+- **beads-compound plugin** — added to Claude Code Orchestration section (#1814)
+- **Stale reference cleanup** — removed daemon/SQLite/JSONL/tombstone references from docs and comments
+
+## [0.52.0] - 2026-02-16
+
+### Added
+
+- **`bd ready --include-ephemeral`** — new flag to include ephemeral issues in ready work results
+
+### Fixed
+
+- **Doctor redirect target resolution** — fix path resolution for redirect targets (#1803)
+- **Dolt directory creation guard** — skip dolt directory creation when not in server mode (#1800)
+- **Tilde expansion in core.hooksPath on Windows** — properly expand `~` in git hook paths (#1798)
+- **Worktree redirect path resolution** — resolve redirect paths from worktree root, not `.beads/` dir (#1791)
+- **Block rename-prefix in worktrees** — prevent rename-prefix from running in git worktrees to avoid JSONL staleness (#1792)
+- **CI lint warnings** — resolve gosec G204 and unparam lint warnings (#1790)
+
+### Removed
+
+- **Dead git-portable sync functions** — remove unused `gitCommitBeadsDir` and `gitPush` (#1793)
+
+## [0.51.0] - 2026-02-16
+
+### Changed
+
+- **Dolt-native cleanup (dolt-1s40)** — massive 8-phase refactoring to remove all legacy SQLite/JSONL/daemon infrastructure:
+  - Phase 2: Remove daemon compat stub and `--no-daemon` flag
+  - Phase 3: Remove 3-way merge engine
+  - Phase 4: Remove tombstone/soft-delete system
+  - Phase 5: Remove JSONL sync layer
+  - Phase 6: Remove SQLite backend entirely
+  - Phase 7: Remove storage factory, memory backend, and provider abstraction; replace with direct Dolt calls
+  - Phase 8: CLI & config cleanup — remove remaining SQLite/daemon remnants
+- **Post-cleanup pruning** — removed 12 dead/duplicate DoltStore methods (650 lines), 5 legacy doctor checks (1,457 lines), internal/beads type aliases, stale no-op stubs and dead functions
+- **`bd sync` is now a no-op** — sync layer removed as Dolt handles persistence directly
+- **Dolt-native API renamed** — legacy storage API consolidated to direct DoltStore calls
+- **Server watchdog** — added Dolt server health monitoring
+
+### Fixed
+
+- **Dolt config test corruption** — tests calling `setDoltConfig()` used `FindBeadsDir()` which in worktree environments returned the rig's `.beads/` instead of the test's temp dir; fixed with `t.Setenv("BEADS_DIR", beadsDir)` (#1780)
+- **Dolt embedded mode database name** — read from `metadata.json` instead of hardcoding (#bd-pqn2e)
+- **Batch `DeleteIssues` hang** — queries batched to prevent hang on large ID sets, with correctness hardening and comprehensive tests (#1770)
+- **`bd mol current` step readiness** — use `analyzeMoleculeParallel` for accurate step readiness (#1786, #1276)
+- **`bd doctor` AccessLock** — migrate Dolt health checks to shared AccessLock connection with error-path tests and `CloseWithTimeout` documentation (#1780)
+- **`bd doctor --yes`** — honor `--yes` flag for repo fingerprint auto-fix (#1782)
+- **`bd doctor` sqliteConnString pragmas** — restore pragmas dropped by Phase 8 cleanup
+- **`GetReadyWork` type filtering** — exclude workflow/identity types from ready work results (#1774)
+- **`bd create` dependency direction** — swap dependency direction for explicit `blocks:` prefix (#1742)
+- **`bd dolt seed` custom types** — seed `types.custom` in default config (#1733)
+- **`message` built-in type** — add `message` as recognized built-in issue type (#1742)
+- **Routing redirect resolution** — lock relative redirect resolution for routed lookups (#1751)
+- **Schema init skip** — skip schema initialization when already at current version (#1765)
+- **Test race conditions** — serialize `dolt.New()` and stdio redirection to eliminate test races
+- **`deleteBatch` signature mismatch** — fix signature and unused types import
+- **gofmt** — formatting fixes across 24+ files
+- **Bounded lock contention** — enforce bounded lock retry behavior in syncbranch read/write tests (#1777)
+- **Malformed test names** — fix test names and remove obsolete SQLite-backend doctor tests
+
+### Performance
+
+- **CASCADE deletes** — leverage SQL CASCADE to cut deletion queries by 60%
+- **Schema init** — skip when already at current version, reducing startup overhead
+
+### Documentation
+
+- **SQLite → Dolt migration** — updated 10+ documentation files replacing stale SQLite references with Dolt (ARCHITECTURE.md, FAQ, TROUBLESHOOTING, WORKTREES, INTERNALS, and more)
+- **Deleted deprecated docs** — removed `EXTENDING.md` and `MULTI_REPO_HYDRATION.md` (SQLite-era, no longer applicable)
+- **INSTALLING.md** — revised for mise installation methods (#1756)
+- **CLAUDE.md** — fix stale file references and SQLite mentions
+- **Contributor docs** — updated stale SQLite references to Dolt
+- **Dolt migrate command** — fix typo (#1779)
+
+## [0.50.3] - 2026-02-15
+
+### Added
+
+- **SyncEngine hook system** — `PullHooks` (GenerateID, TransformIssue, ShouldImport) and `PushHooks` (FormatDescription, ContentEqual, ShouldPush, BuildStateCache/ResolveState) allow tracker-specific behaviors without modifying the engine
+- **Jira native integration** — extracted into `internal/jira/` package with REST API v3 client, ADF document conversion, field mapping, and full test coverage
+- **Tracker plugin registry** — `tracker.Register()` + `init()` pattern for auto-discovery of tracker implementations (Linear, GitLab, Jira)
+
+### Changed
+
+- **SyncEngine refactor** — all three tracker CLIs (Linear, GitLab, Jira) now use the shared `tracker.Engine` for Pull→Detect→Resolve→Push orchestration, eliminating ~800 lines of duplicated sync code
+- **Tracker adapters inlined** — moved from `internal/tracker/adapters/{linear,gitlab}` into `internal/{linear,gitlab}` as self-contained packages with `tracker.go` and `fieldmapper.go`
+
+### Fixed
+
+- **Jira State mapping bug** — removed stale `*StatusField` pointer assignment in `jiraToTrackerIssue` that could cause incorrect status mapping when Priority was set but Status was nil
+- **CI: Windows build** — renamed `test_wait_helper.go` to `_test.go` suffix so non-test builds don't try to resolve test-only symbols
+- **CI: gofmt** — fixed formatting across 14 files
+- **Formula variable validation** — use `Required` field for formula variable validation
+- **`bd slot` routing** — added routing and label-based agent check to slot commands
+
+### Performance
+
+- **Test suite** — replaced ~60 `git init` subprocess calls with cached template copy, reducing test setup overhead
+
+## [0.50.2] - 2026-02-14
+
+### Added
+
+- **SQLite-to-Dolt migration nudge** — rate-limited hint (once per 24h) on any `bd` command for SQLite users, plus `bd doctor` backend migration check (#1706)
+- **Dolt audit log** for `bd dolt config set` changes
+
+### Fixed
+
+- **`bd doctor` performance** — replaced O(n) full-table scans with SQL aggregation queries, reducing doctor runtime from 130s to 6s on large databases (#1706)
+- **Dolt metadata writes** — reliable `bd_version`, `repo_id`, `clone_id` persistence with init-time verification, doctor fix, and migrate extension (#1741)
+- **`FindBeadsDir` worktree boundary** — stopped directory walk from escaping sibling worktree boundaries (#1731)
+- **`bd doctor` plugin install command** — corrected command shown in doctor output (#1732)
+- **Backend descriptions** — updated `bd backend list` and help text to show Dolt as the default (not SQLite) since v0.50
+
+## [0.50.1] - 2026-02-14
+
+### Fixed
+
+- **CI: goreleaser failure** — removed dead `internal/rpc` import from test stubs that broke `go mod tidy`
+- **CI: Windows smoke test** — use `--backend sqlite` and temp dir to avoid Dolt dependency and repo `.beads/` conflicts
+- **CI: lint errors** — updated golangci-lint v2 exclusions for fmt.Fprintf errcheck, gosec G104/G304
+- **CI: gofmt** — fixed formatting in init_test.go, main.go, sync_git_remote_test.go
+
+### Added
+
+- **Plugin-based issue tracker framework** with Linear and GitLab adapters (#1150)
+
+## [0.50.0] - 2026-02-14
+
+### Added
+
+- **Dolt is now the default backend** for new `bd init` projects. Existing SQLite projects are unaffected. `BEADS_DB` env var auto-detects SQLite.
+- **`bd graph` visualization overhaul** — terminal-native horizontal DAG as default view, plus DOT and interactive HTML export formats. Old box view available via `--box` (bd-9de)
+- **`bd sql` command** for raw SQL access to the underlying database. Supports table, JSON, and CSV output
+- **`bd help --all`** to dump complete command reference (#1699)
+- **`decision` built-in issue type** with aliases and help strings
+- **Cross-database dependency resolution** via prefix routes in `bd show`, `bd graph`, and `bd blocked` — external deps display actual title, status, and priority (bd-k0pfm)
+- **`bd show --watch`** flag for auto-refreshing display on file changes with fsnotify debounce
+- **`bd vc commit --stdin`** for reading multi-line commit messages from stdin
+- **`BD_BRANCH` env var** for branch-per-polecat write isolation in Dolt
+- **`BD_NAME` env var** for multi-instance help text identity
+- **`bd doctor` artifact cleanup** — `--check=artifacts` detects stale JSONL, WAL/SHM, backup files. Works with `--clean` and `--fix`
+- **`bd doctor` Claude Code integration checks** — detect malformed `settings.json`, verify hook completeness, detect legacy MCP tool references
+- **`bd doctor` output grouped by category** with per-category pass counts
+- **Dolt corruption recovery** via `bd doctor --fix` — backs up corrupted `.dolt-data/`, reinitializes fresh Dolt database, auto-imports from JSONL backup
+- **Frictionless `bd init`** — better test-issue detection, non-interactive stdin detection, version tracking at init time, cancellable prompts, actionable error hints via `FatalErrorWithHint`
+- **Mise installation** documented in INSTALLING.md
+
+### Changed
+
+- **Default backend is Dolt** — `bd init` without `--backend` now creates Dolt databases. Existing projects with no explicit backend in metadata.json continue to use SQLite (backward compatible)
+- **Removed daemon/RPC subsystem** — internal daemon, RPC layer, and `internal/rpc/` package deleted (~19,663 lines). All commands use direct embedded database access
+- **Removed JSONL sync layer** — `internal/importer/`, `markDirtyAndScheduleFlush()`, and `daemonClient != nil` branches eliminated (~7,634 lines)
+- **Stripped dirty tracking from Storage interface** — `MarkIssueDirty` subsystem no longer part of the storage contract
+- **`bd graph` default view** changed from vertical box layout to horizontal DAG
+- **Schema version downgrade protection** — CLI refuses to run against a database written by a newer version
+- **Upgrade notification** only triggers for actual version upgrades (no longer fires on downgrades/branch switches)
+- **`resolve-conflicts` defaults to canonical `issues.jsonl`**
+- **Batch `GetLabelsForIssues`** replaces N+1 `GetLabels` calls in list operations
+- **Consolidated redirect resolution** into single `FollowRedirect` function
+- **Backend-agnostic refactoring** — compact, migrate, dep, sync, findReplies, and wisp/mol commands use Storage interface instead of SQLite type assertions
+
+### Fixed
+
+- **`bd close` enforces gate satisfaction** before closing machine-checkable gates (`gh:pr`, `gh:run`, `timer`, `bead`). `--force` bypasses
+- **`bd show` exits non-zero** when issue not found (previously exited 0 with empty JSON output)
+- **`bd list` closed-blocker filtering** — closed issues no longer shown as blockers in annotations
+- **`bd list --parent` includes dotted-ID children** — matches both explicit parent links and `X.*` naming convention
+- **`bd ready` deferred-parent propagation** — excludes children of deferred parents from ready work
+- **Dolt `joinIter` panic** prevented by replacing `IN`/`EXISTS` subqueries with Go-level filtering
+- **Embedded Dolt self-deadlock** in git hooks and `bd migrate` — added to `noDbCommands`
+- **Dolt rename FK violation** — disable FK checks during rename operations
+- **Dolt `GetIssuesByLabel` deadlock** — fixed connection pool exhaustion with `MaxOpenConns=1`
+- **XSS vulnerabilities** in graph HTML export (bd-67uzz)
+- **Redirect path resolution** — resolve from parent of `.beads` dir, not `.beads` itself
+- **`bd migrate --to-dolt`** sets `sync.mode=dolt-native` and uses config-based backend
+- **`bd doctor` backend-agnostic checks** — uses storage factory instead of raw SQLite; routes.jsonl false positive fix; `dolt_mode server` respected
+- **`bd show` extra newline** before first issue header removed
+- **`--type` flag help text** shows only base types
+- **`bd prime` prompt** optimized to avoid spurious "creating issue without description" warning
+- **Linuxbrew ICU paths** supported in Makefile
+- **Windows build recipe** fixed (BINARY conditional moved inside targets)
+- **`go install`** fixed by removing local `replace` directive
+- **Nix flake build** and `gosec` lint errors resolved
+- **Duplicate Cobra command registration** replaced with `Aliases`
+- **Homebrew upgrade command** corrected in upgrading docs
+
+### Documentation
+
+- Added Dolt GitHub link to README
+- Added beadsmap and Beadbox to community tools
+- Corrected Homebrew upgrade command
+- Added Mise installation instructions to INSTALLING.md
+
+## [0.49.6] - 2026-02-08
+
+### Reverted
+
+- **Embedded Dolt mode restored** - The v0.49.5 removal was premature; embedded mode is still needed in Beads (only Gas Town should be server-only). Restores dolthub/driver, advisory flock, embedded connector lifecycle, CGO build tags, and vendored go-icu-regex
+
+## [0.49.5] - 2026-02-08
+
+### Added
+
+- **`bd search` content and null-check filters** - Filter issues by description content and metadata presence (`--has`, `--no`) (bd-au0.5)
+- **`bd promote` command** - Promote wisps to persistent beads (gt-7mqd.9)
+- **`bd todo` command** - Lightweight task management for quick personal tracking
+- **`bd find-duplicates` command** - AI-powered duplicate issue detection (bd-581b80b3)
+- **`bd validate` command** - Data-integrity health checks, integrated into `bd doctor --check=validate` (bd-e108)
+- **Dolt fail-fast TCP check** - Quick connectivity check before MySQL protocol initialization
+- **Windows PE version info** - Embedded version metadata reduces antivirus false positives (bd-t4u1)
+- **Centralized AI model config** - `ai.model` config key with `DefaultAIModel()` helper
+- **Newsletter generator** - Automated narrative release summaries (#1197)
+
+### Changed
+
+- **Embedded Dolt mode removed** - Server-only Dolt connections now; embedded driver fully removed (bd-esqfe). Windows Dolt backend connects via MySQL protocol. **Note: reverted post-release — see [Unreleased]**
+- **`bd init` defaults to chaining hooks** - No longer prompts; chains by default (bd-bxha)
+- **Homebrew formula name** - `bd doctor` now correctly suggests `brew upgrade beads` instead of `brew upgrade bd`
+- **Doctor output** - Summary-first layout with improved formatting (bd-4qfb)
+- **JSON output standardized** - Consistent JSON format across all commands (bd-au0.7)
+- **Go toolchain** - Downgraded from 1.25.7 to 1.25.5 for Nix compatibility. **Note: back to 1.25.7 after embedded Dolt restore — see [Unreleased]**
+
+### Fixed
+
+- **Security: SQL injection prevention** - SQL identifier validation for dynamic table and database names (dolt-test-46a)
+- **Security: path traversal** - Fixed path traversal in export handler and command injection in import
+- **Security: CVE-2025-68121** - Go toolchain upgrade for TLS runtime fix
+- **RPC: empty mutation events** - Pass issueID via closure to prevent zero-value IDs in label/dep operations (dolt-test-rgh)
+- **RPC: server shutdown** - Drain in-flight requests before closing storage; proper response-write-then-shutdown pattern
+- **RPC: nil storage guards** - Added to handleCommentList, handleCommentAdd, and health handler
+- **RPC: daemon socket path** - Use ShortSocketPath for status/health/metrics commands
+- **Daemon: YAML config parsing** - Recognize both hyphenated and underscored daemon config keys (e.g., `auto-sync` and `auto_sync`)
+- **Daemon: stderr redirect** - Removed unsafe global os.Stderr replacement during import
+- **Daemon: daemon stop suggestion** - `bd doctor` fix suggestions now include workspace path argument
+- **Doctor: role check** - Falls back to database config for users who set role via `bd config set`
+- **Doctor: gastown detection** - Auto-detect gastown mode when routes.jsonl exists
+- **Doctor: routing mode** - Accept `explicit` as valid routing mode alongside auto/maintainer/contributor
+- **Doctor: Dolt conflicts query** - Use correct `table` column name (not `table_name`)
+- **Sync: conflict resolution** - Apply --ours/--theirs strategy correctly
+- **Sync: tombstone export** - Include tombstones in auto-flush full export
+- **Merge: panic prevention** - Use strings.HasPrefix to prevent panic on short error messages
+- **Import: label sync** - Remove DB labels absent from JSONL during import
+- **Import: issueEqual comparison** - Include dependencies and comments in comparison
+- **Export: dirty flag preservation** - Prevent stdout export from clearing dirty flags and auto-flush state
+- **Export: temp file collisions** - Use unique temp filenames in writeMergedStateToJSONL
+- **Migration: bounds checks** - Add bounds checks for slice/string access in migrate.go
+- **Migration: daemon check** - Check for running daemon before dolt migration
+- **Migration: error logging** - Log warnings for label and dependency import errors
+- **Migration: legacy spec_id** - Fix doctor --fix migration for legacy spec_id
+- **SQLite: WAL retry deadlock** - Make Close() idempotent to prevent deadlock (bd-4ri)
+- **SQLite: BUSY retry** - Use SQLITE_BUSY retry logic for all BEGIN IMMEDIATE calls (bd-ola6)
+- **SQLite: JSONL locking** - Add exclusive lock to flushToJSONLWithState to prevent race conditions
+- **Dolt: connection retry** - Make "connection refused" retryable in retry logic
+- **Dolt: cross-rig contamination** - Use prefix-based database names; detect contamination in post-migration check
+- **Dolt: port consistency** - Use port 3307 consistently for server connections
+- **Config: beads.role** - Write to git config instead of SQLite
+- **Config: viper guard** - Log when viper uninitialized in getConfigList
+- **Config: BD_BACKEND blocked** - Block env var to prevent data fragmentation (bd-hevyw)
+- **`bd list` output** - Separate parent-child from blocks display; `--all` disables default limit
+- **`bd dep list` routing** - Fix cross-rig routing from town root (bd-ciouf)
+- **Cross-prefix ID resolution** - Support multi-repo scenarios (GH#1513)
+- **Staleness checks** - Added to export, graph, history, gate list commands
+- **Gitignore template** - Add `.jsonl.lock` to template and requiredPatterns
+- **MCP plugin** - Remove output_schema workaround for FastMCP 2.14.4
+- **Nix/Windows CI** - Unbroken: removed orphaned pure_go_windows.go, updated flake.lock, fixed vendorHash
+
+### Documentation
+
+- Messaging system documentation (messaging.md)
+- Issue metadata field and reserved key prefixes
+- Docker trick for updating flake.lock without nix
+- Community Tools: JetBrains beads-manager plugin, Beadspace desktop app
+- Fix ready docs and external-ref documentation (#1523, #1339)
+
+## [0.49.4] - 2026-02-05
+
+### Added
+
+- **Label pattern and regex filtering** - New `--label-pattern` (glob) and `--label-regex` flags for `bd list` and `bd ready`. Filter issues by label patterns like `tech-*` or regex like `tech-(debt|legacy)` (#1491)
+- **Simple query language** - Complex filtering via a simple query syntax for `bd list`
+- **`beads` command alias** - Installer now creates a `beads` alias alongside `bd`
+- **spec_id field** - New field for linking issues to specification documents (#1372)
+- **Wisp type field** - `wisp_type` column for TTL-based compaction of ephemeral molecules
+- **Dolt schema migration runner** - Automated schema migrations for Dolt backend
+- **Dolt migration validation in bd doctor** - Checks for Dolt migration health
+- **Agent-managed Dolt upgrade path** - `bd migrate` support for Dolt upgrades
+- **`--metadata` flag for bd update** - Update issue metadata from CLI via JSON (#1417, bd-0vud2)
+- **UpdateIssue metadata via json.RawMessage** - Programmatic metadata updates (#1417)
+- **BD_SKIP_ACCESS_LOCK env var** - For Dolt lock testing scenarios
+- **Orphan branch support for sync-branch migration** - Cleaner sync branch setup
+- **config.local.yaml support** - Local configuration overrides via `.beads/config.local.yaml`
+- **Makefile up-to-date check** - `make install` now verifies repo is current before building
+
+### Changed
+
+- **`bd ready` now shows only open issues** - Excludes in_progress, matching `bd list --ready` behavior. Shows work that is truly available to claim
+- **release.sh is now a molecule gateway** - Creates a release wisp instead of running a batch script
+- **Merge driver embeds types.Issue** - Prevents field drift between merge driver and core types (#1481)
+
+### Fixed
+
+- **JSONL file locking** - Prevents race conditions in concurrent writes and incremental exports
+- **WAL checkpoint robustness** - Retry logic for SQLite WAL checkpointing
+- **Merge driver field drift** - Driver now preserves all issue fields including spec_id, metadata, and dependencies (#1480, #1481, #1482)
+- **Atomic bd claim** - Compare-and-swap semantics prevent race conditions (#1474)
+- **BEADS_DIR routing** - Respects BEADS_DIR over prefix routing in show/close/update commands
+- **Dolt-native sync fixes** - Disabled JSONL sync exports, auto-flush, and imports in dolt-native mode to prevent conflicts
+- **Daemon auto-import** - Proper JSONL import on startup with hash update; check changes AFTER pulling
+- **Windows build** - Dolt now builds on Windows via pure-Go regex; prebuilt releases in installer
+- **Cross-rig dependency resolution** - Uses factory.NewFromConfig for proper backend detection
+- **Dolt lock contention** - Advisory flock prevents zombie processes; scoped migration helpers
+- **Dolt connection stability** - Retry logic for transient errors, timeout on embedded close, fix for nested query bad connections
+- **Dolt FK constraint** - Removed FK constraint on depends_on_id for external references
+- **bd list --tree deduplication** - Children no longer appear multiple times
+- **bd show relates-to display** - Correctly displays and deduplicates RELATED section
+- **bd cleanup --hard** - Always prunes tombstones immediately
+- **Formula TOML vars** - Accept simple string vars in [vars] section
+- **config.yaml fallback** - Custom types work in daemon mode
+- **Content-based merge for daemon pulls** - Prevents spurious conflicts (GH#1358)
+- **TOML snake_case tags** - Proper serialization of formula struct fields
+- **Worktree bare repo support** - Use GetGitCommonDir for worktree creation
+- **routes.jsonl corruption** - Excluded from FindJSONLInDir to prevent import errors
+- **Compaction safety logic** - Restored accidentally removed safety checks
+- **Structured logging** - Replaced custom daemonLogger with *slog.Logger
+
+### Documentation
+
+- Non-interactive shell command guidance for agents
+- Makefile CGO settings and DOLT.md env vars
+- Atomic claim feature in quick reference
+- ICU build deps and installer hints
+- Community Tools: beads-sdk and Beads Task-Issue Tracker
+
+## [0.49.3] - 2026-01-31
+
+### Changed
+
+- **Embedded Dolt is now the default** - Server mode is opt-in via `dolt_mode: "server"` in metadata.json or `BEADS_DOLT_SERVER_MODE=1` env var
+
+### Fixed
+
+- **Dolt split-brain root cause eliminated (B1+B2)** - `DatabasePath()` now always resolves to `.beads/dolt/` for dolt backend regardless of stale `database` field values; `bootstrapEmbeddedDolt()` blocks JSONL auto-import in dolt-native sync mode to prevent silent rogue database creation
+- **CGO/ICU build fix** - Makefile and test.sh detect Homebrew's keg-only `icu4c` and export CGO flags so dolt's go-icu-regex dependency links correctly on macOS
+- **Dolt mergeJoinIter panic** - Eliminated three-table joins that triggered panics on type-filtered queries; added guard against nil pointer panic during auto-import in dolt-native mode
+- **Template variable extraction** - Filter Handlebars keywords (`if`, `each`, `unless`, `with`) from `extractVariables` (#1411)
+
+## [0.49.2] - 2026-01-31
+
+### Added
+
+- **GitLab backend for bidirectional issue sync** - Full GitLab integration for syncing beads issues with GitLab
+  - REST API client wrapper with pagination, rate limiting, and context cancellation
+  - Bidirectional sync: pull from GitLab, push to GitLab with conflict detection
+  - `bd gitlab sync`, `bd gitlab status`, `bd gitlab projects` subcommands
+  - GitLab-to-beads mapping with path-based IDs and collision handling
+  - Conflict resolution strategies for concurrent edits
+  - Integration and unit test suites
+
+- **Key-value store** - New `bd kv` subcommand for persistent key-value storage
+  - `bd kv get`, `bd kv set`, `bd kv delete`, `bd kv list` commands
+  - Key validation and proper exit codes on missing keys
+
+- **Per-issue JSON metadata field** - Optional metadata field on issues (SQLite + Dolt) (#1407)
+
+- **Events JSONL export** - Opt-in event audit trail export via `events-export` config
+
+- **Role configuration** - Explicit role configuration via git for agent and user roles
+  - `bd init` interactive contributor role prompt
+  - UserRole detection in RepoContext
+  - Agent roles configurable via config (bd-hx8w)
+
+- **Dolt improvements**
+  - Dolt-specific diagnostics and performance profiling in `bd doctor`
+  - Auto-detect Dolt server and enable server mode during `bd init`
+  - Env var overrides for Dolt server connection settings
+  - `bd backend` and `bd sync mode` subcommands for inspecting storage config
+
+- **CLI improvements**
+  - `comment_count` in issue JSON views (list, ready, search)
+  - Comment timestamps with time display and `--local-time` flag
+  - Hint to view step instructions in `bd mol current` output (#1403)
+  - Resolve external refs in `bd dep list` for cross-rig dependencies
+  - Inline blocking dependency display in `bd list` output
+
+- **Jira sync** - `pull_prefix` and `push_prefix` config options for flexible prefix mapping
+
+- **Sync** - Push permission error detection during sync
+
+### Changed
+
+- **Separation of concerns** - Removed Gas Town-specific code from beads core
+  - Removed Gas Town role detection from hooks
+  - Removed `--role-type` flag from `bd create`
+  - Removed Gas Town actor validation from validation layer
+  - Generalized RoleType to be project-agnostic
+
+- **Refactoring**
+  - Storage factory for backend-aware database access
+  - Compact accepts interface instead of concrete SQLiteStorage
+  - RPC layer no longer imports sqlite directly
+  - JSONL deletion markers now processed during import
+
+### Fixed
+
+- **GitLab fixes** - Multiple rounds of code review improvements for merge readiness
+  - Conflict detection before push with SyncContext
+  - Pagination limits and context cancellation
+  - Error handling and type safety improvements
+
+- **Dolt backend fixes**
+  - Graceful server-to-embedded fallback when Dolt server unreachable
+  - Detect and clean stale Dolt lock files
+  - Skip JSONL staleness check in dolt-native mode
+  - Backend detection in all `bd doctor` fix functions
+  - Use `GetDoltDatabase()` instead of raw config for server mode
+  - Factory-based storage creation for backend awareness
+  - Fix for stale JSONL in dolt-native mode
+  - SQLite not created when Dolt fails in dolt-native mode
+  - Revert Dolt lock cleanup workaround; fix embedded Dolt open via driver retries (#1389)
+
+- **Sync fixes**
+  - Set GIT_DIR and GIT_WORK_TREE in GitCmd for worktree support
+  - Normalize JSONL path in CommitToSyncBranch for sync-branch mode
+  - Use store.Path() for database mtime update
+  - Ensure sync-branch worktree exists on fresh clone (#1349)
+  - Skip sync when source and destination JSONL paths are identical (#1367)
+  - Respect dolt-native mode in daemon_sync_branch.go
+  - Respect dolt-native mode in JSONL export paths
+  - Auto-stage JSONL files after flush in pre-push hook
+
+- **Other fixes**
+  - Ignore undeclared handlebars in formula description text (#1394)
+  - Exclude ephemeral issues from Linear sync push (#1397)
+  - Allow event type in CreateIssue validation (#1398)
+  - Update MCP Stats model to match `bd stats --json` output (#1392)
+  - Handle EINVAL from chmod on Unix sockets in containers (#1399)
+  - Correct error message for `--gated` flag (#1391)
+  - Check rows.Err() in SQLite GetAllEventsSince
+  - Exclude tombstones from external_ref uniqueness validation
+  - Handle nil pointer dereference in `bd restore` with invalid issue ID
+  - Make daemon start idempotent (#1334)
+  - YAML config support for daemon auto-sync settings (#1294)
+  - Use IsValidWithCustom for `--type` validation (#1356)
+  - Skip SQLite-specific checks in doctor when using Dolt backend
+  - Tombstone wins over closed in merge conflict resolution
+
+### Documentation
+
+- GitHub Copilot integration guide with cross-platform MCP paths (#1348)
+- KV store CLI documentation
+- Updated COMMUNITY_TOOLS.md
+- Added export-state/ to gitignore template
+
+## [0.49.1] - 2026-01-25
+
+### Added
+
+- **Dolt backend now fully supported** - The Dolt storage backend has been extensively tested and is ready for community evaluation
+  - **Note:** Dolt is not enabled by default. We encourage users to try it out and report feedback!
+  - Auto-commit on write commands with explicit commit authors (#1267)
+  - Server mode for multi-client access - enables multiple processes to share a Dolt database
+  - `bd doctor --server` flag for Dolt server mode health checks
+  - Server mode configuration in metadata.json schema
+  - Comprehensive test suite for Dolt storage backend (#1299)
+  - Lock retry and stale lock cleanup for operational reliability (#1260)
+  - Adaptive ID length instead of hardcoded 6 chars
+  - See docs/DOLT.md for setup guide
+
+- **New command flags**
+  - `bd activity --details/-d` for full issue information in activity feed (#1317)
+  - `bd export --id` and `--parent` filters for targeted exports (#1292)
+  - `bd update --append-notes` flag to append to existing notes (#1304)
+  - `bd update --ephemeral` and `--persistent` flags (#1263)
+  - `bd show --id` flag for IDs that look like flags
+
+- **Doctor improvements**
+  - `--server` flag for Dolt server mode health checks
+  - Stale closed issues check is now configurable (#1291)
+
+- **Community tools** - Added beads-kanban-ui, beads-orchestration (#1255), and abacus (#1262)
+
+- **Newsletter generator** - Automated narrative summaries of releases
+
+### Changed
+
+- **Homebrew installation** - Now uses core tap for beads installation (#1261)
+- **GitHub Actions** - Upgraded for Node 24 compatibility (#1307, #1308)
+
+### Fixed
+
+- **Dolt backend fixes**
+  - Skip JSONL checks in pre-push hook for dolt-native mode
+  - Add ID generation to transaction CreateIssue
+  - Use capabilities check instead of blanket Dolt block in daemon
+  - Recognize shim hooks as Dolt-compatible
+  - Add hook compatibility check and migration warning
+  - Skip JSONL sync for Dolt backend
+  - Refuse daemon startup with deprecated --start flag for Dolt backend
+  - Add YAML fallback for custom types/statuses
+  - Prevent daemon startup and fix routing same-dir check
+  - Proper server mode support for routing and storage
+  - Skip daemon auto-start for all Dolt backends
+
+- **Daemon fixes**
+  - Prevent stack overflow on empty database path (#1288, #1313)
+  - Add sync-branch guard to daemon code paths (#1271)
+
+- **List command fixes**
+  - Optimize `bd list --json` to fetch only needed dependencies (#1316)
+  - Prevent nil pointer panic in watch mode with daemon (#1324)
+  - Populate dependencies field in JSON output (#1296, #1300)
+
+- **Import/export fixes**
+  - Support custom issue types during import (#1322)
+  - Populate export_hashes after successful export (#1278, #1286)
+  - Use transaction for handleRename in upsertIssuesTx (#1287)
+
+- **SQLite fixes**
+  - Use BEGIN IMMEDIATE without retry loop (#1272)
+  - Add retry logic to transaction entry points (#1272)
+  - Use withTx helper for remaining transaction entry points (#1276)
+
+- **Other fixes**
+  - `bd gate add-waiter` now functions correctly (#1265)
+  - Respect BEADS_DIR environment variable in init (#1273)
+  - Find molecules attached to hooked issues (#1302)
+  - Separate parent-child deps from blocking deps in `bd show` (#1293)
+  - PrefixOverride now respected in transaction storage layer (#1257)
+  - Prime command defaults to beads, avoids TodoWrite/TaskCreate (#1289)
+  - Build: `make install` now properly builds, signs, and installs to ~/.local/bin
+
+### Documentation
+
+- **Dolt backend guide** - Comprehensive docs/DOLT.md guide (#1310)
+  - Federation section with quick start and topologies
+- **Articles collection** - Created ARTICLES.md for articles and tutorials about Beads (#1306)
+
+## [0.49.0] - 2026-01-21
+
+### Added
+
+- **Dolt federation for multi-repo sync** - Peer-to-peer issue synchronization across repositories
+  - `bd federation sync` command for syncing with configured peers
+  - `bd federation status` shows connection and sync state
+  - SQL-server mode for daemon (`--federation` flag) enables peer connections
+  - SQL user authentication for secure peer-to-peer sync
+  - Doctor federation health checks validate connectivity and sync state
+  - See docs/FEDERATION.md for setup guide
+
+- **SQLite to Dolt migration** - Migrate existing repos to version-controlled storage
+  - `bd migrate dolt` converts SQLite database to Dolt backend
+  - Preserves full issue history during migration
+  - Automatic JSONL bootstrap for routes and interactions
+
+- **New commands**
+  - `bd children <id>` - Display child issues for a parent
+  - `bd rename <old-id> <new-id>` - Rename issue IDs
+  - `bd view` - Alias for `bd show` command (#1249)
+  - `bd config validate` - Validate sync configuration
+  - `bd mol seed --patrol` - Seed patrol molecules (#1149)
+
+- **Sync improvements**
+  - Per-field merge strategies for fine-grained conflict resolution
+  - Interactive conflict resolution with `--manual` strategy
+  - Incremental export for large repositories (performance improvement)
+  - `sync.mode` configuration to control sync behavior
+
+- **CLI conveniences**
+  - `-m` flag as alias for `--description` in `bd create`
+  - `--type` and `--exclude-type` flags for Linear sync filtering (#1205)
+  - `--tree --parent` combination for hierarchical display (#1211)
+
+- **Jujutsu (jj) version control support** - Beads now works with jj repositories
+  - Hook support for jj operations
+  - Proper detection of jj-managed repositories
+
+- **Codex CLI setup recipe** - Automated setup for OpenAI Codex CLI integration (#1243)
+
+- **Real-time activity feed** - Uses fsnotify for instant updates
+
+- **Per-worktree export state tracking** - Each worktree maintains independent sync state
+
+- **Automatic multi-repo hydration in `bd init --contributor`** - Routing and hydration now configured together
+  - `bd init --contributor` automatically adds planning repo to `repos.additional`
+  - Routed issues appear in `bd list` immediately after setup
+  - No manual `bd repo add` required for contributor workflow
+
+- **Doctor improvements**
+  - Routing+hydration mismatch detection - warns when routing configured without hydration
+  - Hydrated repo daemon check - ensures JSONL stays fresh in additional repos
+  - Patrol pollution detection and fix
+  - `--gastown` flag for Gas Town-specific checks (#1162)
+  - Federation health checks
+
+- **Nix shell completions** - Baked into default package (#1229)
+
+### Changed
+
+- **Auto-routing disabled by default** - Explicit opt-in required (#1177)
+  - Prevents unexpected cross-repo routing
+  - Enable with `routing.mode: auto` in config.yaml
+
+- **Gas Town types removed from core** - Beads core no longer includes Gas Town-specific types
+  - Types like `patrol`, `convoy` moved to Gas Town configuration
+  - Cleaner separation between beads and Gas Town
+  - Ongoing cleanup tracked in bd-741si, bd-7nd6t, bd-31ajf
+
+### Fixed
+
+- **Daemon zombie state after database file replacement** - Improved reconnection resilience (#1213)
+  - Health checks now properly detect and handle database file replacements
+  - Prevents "sql: database is closed" errors
+
+- **Routed issues invisible in `bd list` (split-brain bug)** - Auto-flush JSONL after routing (#1251)
+  - `bd create` now flushes JSONL immediately in target repo
+  - Hydration now sees new issues immediately
+
+- **WSL2 Docker Desktop compatibility** - Detect bind mounts and disable WAL mode (#1224)
+  - Prevents database corruption on Docker Desktop file systems
+
+- **Daemon stack overflow** - Prevent recursion in handleStaleLock (#1238)
+
+- **Molecule steps excluded from `bd ready`** - Filter out non-actionable items (#1246)
+
+- **Tree ordering stabilization** - Consistent `--tree` output (#1228)
+
+- **Cross-repo orphan detection** - Honor `--db` flag (#1200)
+
+- **Custom types with daemon** - Show custom types when daemon is running (#1216)
+
+- **Dolt backend fixes**
+  - Parse timestamps from TEXT columns correctly
+  - Single-process mode enforcement (daemon/autostart disabled) (#1221)
+  - Read-only daemon commands now work
+  - Init/daemon/doctor integration fixes (#1218)
+
+- **Redirect handling** - Follow redirect when creating database
+
+- **Auto-import tombstone handling** - Auto-correct deleted status to tombstone (#1231)
+
+- **Routing store cleanup** - Close original store before replacing (#1215)
+
+- **Worktree redirect paths** - Correct path computation in `bd worktree create` (#1217)
+
+- **Sync-branch worktree** - Use worktree for `--full --no-pull` (#1183)
+
+- **Custom types from config** - Load types.custom during init auto-import (#1226)
+
+### Documentation
+
+- **Federation setup guide** - Added docs/FEDERATION.md
+  - Peer configuration and authentication
+  - Sync workflow documentation
+
+- **Daemon troubleshooting guide** - Added docs/TROUBLESHOOTING.md and docs/DAEMON.md
+  - Common daemon issues and solutions
+  - Database replacement handling
+
+- **Multi-repo hydration guide** - Added comprehensive section to docs/ROUTING.md
+  - Explains hydration requirement when using routing
+  - Troubleshooting guide for common issues
+
+- **Contributor vs maintainer setup** - Added to README.md
+  - Clarifies when to use `bd init --contributor`
+  - Documents role configuration options
+## [0.48.0] - 2026-01-17
+
+### Added
+
+- **VersionedStorage interface** - Abstract storage layer with history/diff/branch operations
+  - Enables pluggable backends (SQLite, Dolt) with unified API
+  - Supports time-travel queries and branching semantics
+
+- **`bd sync` command specification** - Formalized sync workflow implementation
+  - Clearer separation between export, import, and merge phases
+
+- **`bd types` command** - List valid issue types (#1102)
+  - Shows all available types with descriptions
+
+- **"enhancement" type alias** - Alternative name for "feature" type
+  - Matches GitHub issue label conventions
+
+- **`bd close -m` flag** - Alias for `--reason` (git commit convention)
+  - More intuitive for git users: `bd close <id> -m "reason"`
+
+- **RepoContext API** - Centralized git operations context (#1102)
+  - Consistent git directory handling across codebase
+
+- **Dolt backend improvements (WIP)**
+  - Automatic bootstrap from JSONL on first access
+  - Git hook infrastructure for Dolt operations
+  - `bd compact --dolt` flag for Dolt garbage collection
+
+### Fixed
+
+- **Doctor sync branch health check** - Removed destructive --fix behavior (GH#1062)
+  - No longer warns about expected source file differences
+  - Prevents accidental sync branch history destruction
+
+- **Duplicate merge target selection** - Use combined weight (GH#1022)
+  - Considers both dependents and dependencies when choosing merge target
+  - Prevents closing issues with children/dependencies
+
+- **Worktree exclude paths** - Use --git-common-dir for correct paths (GH#1053)
+  - Fixes `bd init --stealth` in git worktrees
+
+- **Daemon git.author config** - Apply configured author to sync commits
+  - Respects `git.author` config and `BD_GIT_AUTHOR` env var
+
+- **Hook chaining preservation** - Prevent --chain from destroying original hooks (#1120)
+  - Backs up existing hooks before chaining
+
+- **Sync routed prefixes** - Allow routed prefixes in import validation
+  - Fixes multi-prefix workflow issues
+
+- **Windows CGO-free builds** - Enable building without CGO (#1117)
+  - Improved Windows compatibility
+
+- **Shell completions without database** - Work without .beads/ (#1118)
+  - Completions function in non-beads directories
+
+- **Timestamp normalization** - Normalize to UTC for validation (#1123)
+  - Prevents timezone-related validation failures
+
+- **Symlinked .beads directories** - Correct routing for symlinks (#1112)
+  - Proper resolution of symlinked beads directories
+
+- **Nil pointer in ResolvePartialID** - Prevent panic (#1132)
+  - Guards against nil pointer dereference
+
+- **Orphaned dependencies on delete** - Mark dependents dirty (#1130)
+  - Prevents orphan deps in JSONL after issue deletion
+
+- **Git hooks in worktrees** - Fix hook execution (#1126)
+  - Hooks now work correctly in linked worktrees
+
+### Documentation
+
+- **CLI skill reference** - Synced with v0.47.1 commands
+  - Updated command documentation in claude-plugin
+
+- **AGENTS.md fixes** - Removed references to nonexistent CLAUDE.md
+  - Corrected cross-references in documentation
+
+## [0.47.2] - 2026-01-14
+
+### Added
+
+- **Dolt backend (experimental)** - Version-controlled issue storage with time-travel
+  - `bd init --backend=dolt` enables Dolt-based storage
+  - Full version history for issues with branch/merge semantics
+  - See docs/DOLT.md for migration guide
+
+- **`bd show --children` flag** - Display child issues inline with parent
+  - Shows hierarchical structure in issue details
+
+- **Comprehensive NixOS support** - Improved Nix flake and home-manager integration
+  - Better daemon handling in Nix environments
+  - Updated flake.nix with proper dependencies
+
+### Changed
+
+- **Release workflow modernized** - bump-version.sh replaced with molecule pointer
+  - Use `bd mol wisp beads-release --var version=X.Y.Z` for releases
+  - New `scripts/update-versions.sh` for quick local version bumps
+
+### Fixed
+
+- **Redirect + sync-branch incompatibility** - bd sync works correctly in redirected repos (bd-wayc3)
+  - Worktree git status failures resolved
+  - Proper handling of .beads/redirect during sync operations
+
+- **Doctor project-level settings** - Detects plugins/hooks/MCP in .claude/settings.json
+  - No longer misses project-scoped configurations
+
+- **Contributor routing** - `bd init --contributor` correctly sets up routing (#1088)
+  - Fork workflows now properly configure sync.remote=upstream
+
+### Documentation
+
+- **EXTENDING.md deprecated** - Custom SQLite tables approach deprecated for Dolt migration
+  - External tools pattern recommended for integrations
+
+## [0.47.1] - 2026-01-12
+
+### Added
+
+- **`bd list --ready` flag** - Show only issues with no blockers (bd-ihu31)
+  - Filters to issues that are immediately actionable
+  - Equivalent to `bd ready` but integrated into list command
+
+- **Markdown rendering in comments** - Comment text now renders Markdown (#1019)
+  - Enhanced readability for formatted notes and descriptions
+
+### Changed
+
+- **Release formula improvements** - Updated beads-release formula with v0.47.0 learnings
+  - Better gate handling and step organization
+
+### Fixed
+
+- **Nil pointer in wisp create** - Prevent panic when creating wisps (mol)
+  - Fixed nil pointer dereference in molecule creation
+
+- **Route prefix for rig issues** - Use correct prefix when creating issues in rigs (#1028)
+  - Issues created in rigs now use the proper routing prefix
+
+- **Duplicate merge target selection** - Prefer issues with children/deps (GH#1022)
+  - Better heuristics for choosing merge target in duplicate detection
+
+- **SQLite cache rebuild** - Rebuild blocked_issues_cache after rename-prefix (GH#1016)
+  - Ensures cache consistency after prefix changes
+
+- **Doctor JSONL check** - Exclude sync_base.jsonl from multiple files check (#1021)
+  - Reduces false positives in doctor diagnostics
+
+- **Merge struct completeness** - Add QualityScore field to merge Issue struct
+  - Ensures all fields preserved during merge operations
+
+- **MCP custom types** - Support custom issue types and statuses in MCP (#1023)
+  - MCP server now handles non-built-in types correctly
+
+- **Hyphenated prefix validation** - Support hyphens in ValidateIDFormat (#1013)
+  - Prefixes like `my-project-` now validate correctly
+
+- **Git worktree initialization** - Prevent bd init inside git worktrees (#1026)
+  - Avoids configuration issues when initializing in worktree directories
+
+### Documentation
+
+- **bd reset clarification** - Document command behavior and workarounds (GH#922)
+  - Clearer guidance on reset command usage
+
+## [0.47.0] - 2026-01-11
+
+### Added
+
+- **Pull-first sync with 3-way merge** - Major sync improvement (#918)
+  - Reconciles local changes with remote updates before pushing
+  - Field-level conflict merging reduces manual intervention
+  - Base state tracking for better change detection
+
+- **`bd resolve-conflicts` command** - Resolve JSONL merge conflict markers (bd-7e7ddffa)
+  - Mechanical mode uses updated_at timestamps for deterministic resolution
+  - Closed status wins over open, higher priority wins
+  - Notes concatenated, dependencies unioned
+  - Dry-run mode and JSON output for agent integration
+
+- **`bd create --dry-run`** - Preview issue creation without side effects (bd-0hi7)
+  - Shows what would be created in human-readable or JSON format
+  - Works with --rig/--prefix flags
+
+- **Gate auto-discovery** - Auto-discover workflow run ID in `bd gate check` (bd-fbkd)
+  - Queries GitHub directly when await_id is a workflow name hint
+  - ZFC-compliant: takes most recent run deterministically
+
+- **Linear project filter** - `linear.project_id` config for sync (#938)
+  - Fetch only issues from a specific project instead of all team issues
+
+- **`bd ready --gated`** - Gate-resume discovery for molecules (bd-lhalq)
+  - Find molecules waiting on gates for automatic resumption
+
+- **Multi-repo custom types** - Trust and discover types across repositories (bd-62g22, bd-9ji4z)
+  - `bd doctor` discovers custom types from multiple repos
+  - Non-built-in types trusted during hydration
+
+- **Visual UX improvements** - Enhanced display for list tree, graph, and show commands
+  - Better formatting and readability
+
+- **Stale database handling** - AllowStale option in List API (bd-dpkdm)
+  - Read-only commands auto-import on stale DB (#977, #982)
+  - Cold-start bootstrap for read commands
+
+- **Batch molecule operations** - `bd mol burn` supports multiple molecules (feat(mol))
+
+- **Redirect health checks** - `bd doctor` validates redirect configurations
+
+- **Schema extensions** - New fields for HOP integration
+  - `crystallizes` column in sqlite storage
+  - `attests` edge type for skill attestations
+  - `owner` field for human attribution
+  - `actor` fallback includes git user.name (#994)
+
+### Fixed
+
+- **Daemon mode completeness** - Several daemon mode gaps closed (GH#952)
+  - `--due` and `--defer` flags now work in daemon mode (#953)
+  - `bd dep add/remove --json` returns proper JSON output (#961)
+  - `DeferUntil` field parsed correctly in daemon handleCreate (#950)
+  - Silence deprecation warnings in `--json` mode (#1039a691)
+
+- **Sync robustness**
+  - Canonicalize dbPath to fix filepath.Rel errors (GH#959, #960)
+  - Validate custom types in batch issue creation (#943)
+  - Force-add .beads in worktree for contributor mode (#947)
+  - Initialize store after daemon disconnect (GH#984)
+  - `sync --import-only` works when daemon was connected
+
+- **Windows fixes**
+  - Infinite loop in findLocalBeadsDir/findOriginalBeadsDir (GH#996)
+  - `bd init` no longer hangs when not in a git repo (#991)
+  - Daemon stop/kill uses proper Windows API (GH#992)
+  - SQLite uses DELETE mode on WSL2 Windows filesystem (GH#920)
+
+- **Daemon socket handling** - Long workspace paths now work (GH#1001, #1008)
+  - Socket path shortening for deep directory structures
+  - Relocate daemon socket for deep paths
+
+- **Prevent data corruption**
+  - FK constraint failures on batch/concurrent issue creation (GH#956)
+  - Prevent closing issues with open blockers (GH#962)
+  - Nil pointer panic in dep --json mode (GH#998)
+
+- **Doctor improvements**
+  - Recognize bd shims when external manager config exists (GH#946)
+  - Detect lefthook jobs syntax (GH#981)
+  - Add .sync.lock and sync_base.jsonl to gitignore (#980)
+
+- **Prime command** - Use flush-only workflow when no git remote configured (#940)
+
+- **Install safety** - Stop existing daemons before binary replacement (#945)
+
+- **Git hooks** - Add `--no-daemon` to sync commands to prevent inline import failures (#948)
+
+- **Linear sync** - Use project_id when creating issues via `sync --push` (GH#973, #1012)
+
+- **Team wizard** - Validate sync.branch in wizard and migrate commands (GH#923)
+
+- **Worktree fixes**
+  - Skip beads restore when directory is redirected (bd-lmqhe)
+  - Migrate sync works in git worktree environments (#970)
+
+- **Misc fixes**
+  - `bd edit` parses EDITOR with args (GH#987)
+  - Use SearchIssues for ID resolution (GH#942)
+  - Respect hierarchy.max-depth config setting (GH#995, #997)
+  - Add timeout to daemon request context to prevent hangs
+  - Avoid null values in Claude settings hooks (GH#955)
+  - Restore Gas Town types (agent, role, rig, convoy, slot) (GH#941)
+  - Add TypeRig constant and IsBuiltIn method (GH#1002)
+
+### Changed
+
+- **Daemon CLI refactor** - Consolidated to subcommands with semantic styling (#1006)
+
+- **Release formula refactor** - Bump script broken into individual version-update steps (bd-a854)
+  - More durable: can resume from specific step if interrupted
+  - Better visibility in activity feed
+
+### Documentation
+
+- Add lazybeads (Bubble Tea TUI by @codegangsta) to community tools (#951)
+- Fix `bd quickstart` link to database extension documentation (#939)
+
+## [0.46.0] - 2026-01-06
+
+### Added
+
+- **Custom type support** - Configure custom issue types in beads config.yaml (bd-649s)
+  - Define project-specific types beyond the built-in set
+  - Types persist across sync and export
+
+- **Gas Town types extraction** - Core Gas Town types moved into beads package (bd-i54l)
+  - Enables beads to understand rig identities and agent workflows
+  - Foundation for deeper Gas Town integration
+
+### Fixed
+
+- **Gate workflow discovery** - Handle workflow name hints in `gh:run` gate discovery (bd-m8ew)
+  - Better matching of GitHub Actions workflow runs
+  - Consolidated numeric ID handling
+
+## [0.45.0] - 2026-01-06
+
+### Added
+
+- **Dynamic shell completions** - Tab completion for issue IDs in bash/zsh/fish (#935)
+  - Optimized prefix filtering for faster completion
+  - Added completions to more commands
+
+- **Android/Termux support** - Native ARM64 binaries for Android (#887)
+
+- **Deep pre-commit framework integration** - `bd doctor` checks pre-commit hook configs (bd-28r5)
+
+- **Rig identity bead type** - New `rig` bead type for Gas Town rig tracking (gt-zmznh)
+
+- **`--filter-parent` alias** - Alternative to `--parent` in `bd list` (bd-3p4u)
+
+- **Unified auto-sync config** - Simpler daemon configuration for agent workflows (#904)
+
+- **BD_SOCKET env var** - Test isolation for daemon socket paths (#914)
+
+### Fixed
+
+- **External hook manager detection** - `bd doctor` now detects lefthook, husky, pre-commit, and other hook managers
+  - Checks if external managers have `bd hooks run` integration configured
+  - Reports which hooks have bd integration vs which are missing
+  - `bd doctor --fix` uses `--chain` flag when external managers detected to preserve existing hooks
+  - Supports YAML, TOML, and JSON config formats for lefthook
+  - Detects active manager from git hooks when multiple managers present
+
+- **Init branch persistence** - `--branch` flag now correctly persists to config.yaml (#934)
+
+- **Worktree resolution** - Resolve worktrees by name from git registry (#921)
+
+- **Sync with redirect** - Use inline import for `--import-only` with .beads/redirect (bd-ysal)
+  - Handle .beads/redirect in git status checks (bd-arjb)
+  - Persist sync branch to yaml and database (GH#909)
+  - Atomic export and force-push detection (bd-3bhl, bd-4hh5)
+
+- **Doctor improvements**
+  - Recognize lowercase 's' skip-worktree flag (#931)
+  - Improve messaging for detection-only hook managers (bd-par1)
+  - Align duplicate detection with `bd duplicates` (bd-sali)
+  - Query metadata table instead of config for last_import_time (#916)
+
+- **Update prefix routing** - `bd update` now routes like `bd show` (bd-618f)
+
+- **Formula phase** - beads-release formula marked as vapor phase (gt-mjsjv)
+
+- **Lint fixes** - Address gosec, misspell, and unparam warnings
+
+- **CI improvements** - Windows smoke tests, timeouts, golangci-lint exclusions
+
+### Changed
+
+- **Test refactoring** - Replace testify with stdlib in daemon tests (#936)
+
+### Documentation
+
+- Add bun installation method to INSTALLING.md (#930)
+- Add Parade app to community tools list
+
+## [0.44.0] - 2026-01-04
+
+### Added
+
+- **Recipe-based setup architecture** - Major refactor of `bd init` (bd-i3ed)
+  - Modular, composable setup via recipes
+  - Cleaner separation of init concerns
+
+- **Gate evaluation system** - Phases 2-4
+  - `bd gate check` for timer and GitHub gate evaluation (GH#884)
+  - `bd gate discover` for auto-discovery of gh:run await_id (bd-z6kw)
+  - `bd gate add-waiter` and `bd gate show` for phase handoff
+  - Cross-rig bead gate support
+  - Gate-aware beads-release.formula v2 (bd-r24e)
+  - Merge-slot gate for serialized conflict resolution
+
+- **Dependency command improvements**
+  - `--blocks` shorthand flag for natural dependency syntax (GH#884)
+  - `--blocked-by` and `--depends-on` flag aliases (bd-09kt)
+
+- **Multi-prefix support** - `allowed_prefixes` config option (#881)
+  - Configure multiple valid prefixes per rig
+  - Enables flexible issue routing
+
+- **Sync improvements**
+  - Detect uncommitted JSONL changes before sync (GH#885)
+  - `bd doctor` sync divergence check for JSONL/SQLite/git
+  - `BD_DEBUG_SYNC` env for protection debugging
+
+- **`PRIME.md` override** - Workflow customization (GH#876)
+  - Custom prime output per project
+
+- **Daemon config** - `daemon.auto_*` settings in config.yaml (GH#871)
+
+- **Compound visualization** - `bd mol show` displays compound structure (bd-iw4z)
+
+- **`/handoff` skill** - Session cycling slash command (bd-xwvo)
+
+### Fixed
+
+- **`bd ready` now shows in_progress issues** (#894)
+  - Previously filtered out your active work
+
+- **`bd show` displays external_ref field** in text output (#899)
+
+- **macOS case-insensitive path handling** (GH#880)
+  - Worktree validation, daemon paths, git operations
+  - Canonicalize path case for consistency
+
+- **Sync metadata timing** - Finalize after commit, not push (GH#885)
+  - Defer SQLite metadata updates until after git commit
+  - Prevents sync state corruption
+
+- **Sparse checkout isolation** - Prevent config leaking to main repo (GH#886)
+  - Disable sparse checkout on main repo after worktree creation
+
+- **`close_reason` preserved** during merge/sync (GH#891)
+
+- **Parent hub contamination** during `bd init` (GH#896)
+
+- **NoDb mode** - Set cmdCtx.StoreActive correctly (GH#897)
+
+- **Event storm prevention** when gitRefsPath is empty (#883)
+
+- **Doctor improvements**
+  - Detect status mismatches between DB and JSONL (GH#885)
+  - Detect missing git repo, improve daemon startup message (#890)
+  - Skip JSONL tracking checks in sync-branch mode (GH#858)
+
+- **`bd rename-prefix`** - Sync JSONL before and after (#893)
+
+- **`sync.remote` config** now respected in `bd sync` (GH#872)
+
+- **Snapshot protection** made timestamp-aware (GH#865)
+
+- **Hyphenated rig names** supported in agent IDs (GH#854, GH#868)
+
+- **Cross-repo agent routing** (#864)
+
+- **Config key normalization** - GetYamlConfig matches SetYamlConfig (#874)
+
+- **Daemon startup failure** - Propagate reason to user (GH#863)
+
+- **Molecule variable substitution** in root bead title/desc
+
+- **Submodule detection** - Correct main repo root detection (#849)
+
+- **`bd merge` output** sorted by issue id (#859)
+
+- **Auto-create agent bead** when `bd agent state` called on non-existent agent
+
+- **Windows zip extraction** - Add retry logic for npm install
+
+- **Cycle detection** runs in daemon mode for --blocks flag
+
+- **`bd slot set`** cross-beads prefix routing (bd-hmeb)
+
+- **`git status` noise** - Hide issues.jsonl when sync.branch configured (GH#870)
+
+### Changed
+
+- **Skill names** updated from `/bd-*` to `/beads:*` (#862)
+
+### Performance
+
+- **Batch external dep checks** by project (bd-687v)
+
+### Internal
+
+- Extract warnIfCyclesExist helper
+- Gate field parsing and creation tests
+- Sync unit tests for gitHasUncommittedBeadsChanges
+- SQLite cache rebuild benchmarks
+- Repository guards in deployment workflows
+
+## [0.43.0] - 2026-01-02
+
+### Added
+
+- **Step.Gate evaluation** - Phase 1: Human Gates
+  - Gate steps that require human approval before proceeding
+  - Foundation for workflow control points
+
+- **`bd lint` command** - Template validation
+  - Validate issue templates against schema
+  - `--validate` flag also added to `bd create`
+
+- **`bd ready --pretty`** - Formatted output
+  - Human-friendly display of ready work
+
+### Fixed
+
+- **Cross-rig routing** - `bd close` and `bd update` now support cross-rig operations via prefix routing
+- **Agent ID validation** - Now accepts any rig prefix (GH#827)
+- **`bd sync` in bare repo worktrees** - Fixed exit 128 error (GH#827)
+- **`bd --no-db dep tree`** - Now shows complete tree (GH#836)
+- **`.beads/last-touched`** - Restored to gitignore template (GH#838)
+
+## [0.42.0] - 2025-12-30
+
+### Added
+
+- **`llms.txt` standard support** - AI agent discoverability (#784)
+  - Standard endpoint for AI agents to discover project info
+  - Helps LLM-powered tools understand your project
+
+- **`bd preflight` command** - PR readiness checks
+  - Static checklist for pre-commit/pre-push verification
+  - Phase 1 implementation with test, lint, and version checks planned
+
+- **`--claim` flag for `bd update`** - Work queue semantics
+  - Atomic claim-and-assign for multi-agent coordination
+  - Prevents race conditions in work assignment
+
+- **`bd state` and `bd set-state`** - Label-based state management
+  - Helper commands for operational state patterns
+  - Documents labels-as-state pattern
+
+- **`bd activity --town`** - Cross-rig activity feed
+  - Aggregated view across all rigs in town
+  - Better visibility into multi-rig workflows
+
+- **Convoy issue type** - Reactive completion tracking
+  - Issues that complete when all tracked items complete
+  - `tracks` relation type for convoy membership
+
+- **Agent identity trailers** - prepare-commit-msg hook
+  - Automatically adds agent identity to commits
+  - Structured labels for agent beads
+
+- **Daemon RPC endpoints** - Config and mol stale
+  - Remote config queries via daemon
+  - Stale molecule detection endpoint
+
+- **Non-TTY auto-detection** - Cleaner output in pipes
+  - Automatically adjusts output for non-interactive use
+
+### Fixed
+
+- **Git hook chaining** now works correctly (GH#816)
+- **`.beads/redirect` not committed** - Prevents worktree conflicts (GH#814)
+- **`bd sync` with sync-branch** - Fixes worktree copy direction (GH#810, #812)
+- **`sync.branch` validation** - Rejects main/master as sync branch (GH#807)
+- **Read operations read-only** - No more database writes on list/ready/show (GH#804)
+- **`bd list` defaults** - Non-closed issues, 50 limit to protect context (GH#788)
+- **External direct-commit bypass** - When sync.branch configured (bd-n663)
+- **Migration 022 syntax** - SQL error on v0.30.3 upgrade path
+- **MCP redirect support** - Plugin follows .beads/redirect files
+- **Jira sync error** - Better message when Python script not found (GH#803)
+- **Doctor false positives** - For molecule/wisp prefix variants
+- **BD_ACTOR in direct mode** - Consistent actor handling
+- **Label accumulation** - When updating agent role_type/rig
+
+## [0.41.0] - 2025-12-29
+
+### Added
+
+- **`bd swarm` commands** - Multi-agent batch work coordination
+  - `bd swarm create` - Create swarm from epic with children
+  - `bd swarm status` - Show swarm progress and blocked work
+  - `bd swarm validate` - Validate swarm structure and dependencies
+  - N+1 query fix for blocked checks (performance optimization)
+
+- **`bd repair` command** - Orphaned reference repair
+  - Detect and repair orphaned foreign key references
+  - Support for comments/events orphan detection
+  - `--json` flag for machine-readable output
+  - Transaction safety with backup and dirty_issues marking
+
+- **`bd compact --purge-tombstones`** - Dependency-aware cleanup
+  - Remove tombstones while respecting dependency order
+  - Safe cleanup that won't break DAG structure
+
+- **`bd init --from-jsonl`** - Manual cleanup preservation
+  - Initialize database from curated JSONL file
+  - Preserves manual edits made to JSONL
+
+- **`bd human` command** - Focused help menu
+  - Human-friendly command reference
+  - Quick overview without CLI verbosity
+
+- **`bd show --short`** - Compact output mode
+  - Brief issue summary for scripting
+  - Less verbose than default format
+
+- **`bd delete --reason`** - Audit trail for deletions
+  - Optional reason stored in activity log
+  - Better traceability for issue cleanup
+
+- **`hooked` status** - Hook-based work assignment
+  - New status for issues assigned to agent hooks
+  - Enables autonomous agent work pickup
+
+- **`mol_type` schema field** - Molecule classification
+  - Track molecule type (patrol, work, etc.)
+  - New migration (adds schema field)
+
+- **Agent ID canonical naming** - Validation update
+  - Updated validation for orchestrator naming conventions
+  - Supports rig/role/name format
+
+### Fixed
+
+- **`--var` flag allows commas in values** (GH#786)
+  - Variables like `--var files=a.go,b.go` now work correctly
+  - Parser respects quoted values
+
+- **`bd sync` in bare repo worktrees** (GH#785)
+  - Fixed sync failure when working in worktrees of bare repos
+  - Correctly detects git configuration
+
+- **`bd delete --cascade` recursive deletion** (GH#787)
+  - Now properly deletes all transitive dependents
+  - Previously only deleted direct children
+
+- **`bd doctor` pre-push hook detection** (GH#799)
+  - No longer falsely reports hook issues
+  - Correctly identifies bd-managed hooks
+
+- **Gitignore fork protection** (GH#796)
+  - Removed negations that could override protection
+  - Safer fork handling
+
+- **Illumos/Solaris disk space check** (GH#798)
+  - Added platform support for disk space detection
+  - Expands OS compatibility
+
+- **Pre-migration orphan cleanup** - Chicken-and-egg fix
+  - Clean orphans before migration to avoid failures
+  - Smoother upgrade path
+
+- **`hq-` prefix routing** - Town root discovery
+  - Correctly finds routes.jsonl from anywhere in town
+  - Fixes cross-rig routing for HQ beads
+
+- **Config.yaml database override warning**
+  - Shows warning when config overrides db location
+  - Helps debug unexpected behavior
+
+- **`normalizeBeadsRelPath` edge case** - Similar prefix handling
+  - Fixes path normalization for similar prefix names
+  - e.g., `beads` vs `beads-sync`
+
+- **`bd doctor --fix` redirect handling**
+  - Properly follows .beads/redirect files
+  - Limited verbose output for cleaner runs
+
+### Changed
+
+- **CLI command consolidation** - Reduced surface area
+  - Grouped related commands under parent commands
+  - Cleaner `bd --help` output
+
+- **Code organization** - File size limits
+  - Split large cmd/bd files to meet 800-line limit
+  - init.go: 1928 → 705 lines
+  - Improved maintainability
+
+- **Documentation updates**
+  - Replace Epic Planning with Ready Front model
+  - Add components overview (CLI vs Plugin vs MCP)
+  - Add installation method comparison table
+
+### Internal
+
+- Extract IssueDetails to shared type
+- Export FollowRedirect and consolidate implementations
+- Extract shared getEpicChildren helper for swarm commands
+- Extract hashFieldWriter to reduce ComputeContentHash repetition
+- Break up runCook (275 lines) into focused helpers
+- Break up flushToJSONLWithState (280 lines) into focused helpers
+- Extract shared importFromJSONLData function
+- Consolidate duplicated step collection functions
+- Add git helper and guard annotations for tests
+- Fix golangci-lint errors (errcheck, gosec, unparam)
+
+## [0.40.0] - 2025-12-28
+
+### Added
+
+- **`bd worktree` command** - Parallel development support
+  - Manage git worktrees with beads integration
+  - Enables working on multiple issues simultaneously
+
+- **`bd slot` commands** - Agent bead slot management
+  - Track agent assignments with dedicated slot operations
+  - Supports multi-agent orchestration workflows
+
+- **`bd agent state` command** - ZFC-compliant state reporting
+  - Report agent state in standardized format
+  - Enables machine-readable status checks
+
+- **`bd doctor --deep`** - Full graph integrity validation
+  - Deep validation of bead dependency graphs
+  - Includes agent bead integrity checks
+
+- **Agent bead support** - New bead types
+  - `type=agent` and `type=role` for agent tracking
+  - Agent-specific fields in schema (migration 030)
+  - Agent ID pattern validation on create
+
+- **Computed `.parent` field** - JSON output enhancement
+  - Parent field included in JSON for convenience
+  - Simplifies integration with external tools
+
+- **Auto-bypass daemon for wisp operations** - Performance
+  - Ephemeral wisp operations skip daemon overhead
+  - Faster patrol cycle processing
+
+- **Pour warning for vapor-phase formulas** - Safety
+  - Warning when pouring formulas designed for wisps
+  - Prevents accidental persistent molecule creation
+
+### Fixed
+
+- **O(2^n) → O(V+E) cycle detection** (GH#775) - Performance
+  - Replaced exponential algorithm with linear DFS
+  - Dramatic speedup for large dependency graphs
+
+- **Import hash mismatch warnings** - Data integrity
+  - Update jsonl_file_hash on import operations
+  - Prevents spurious hash mismatch warnings
+
+### Deprecated
+
+The following commands are deprecated and will be removed in v1.0.0:
+
+- **`bd relate`** → use `bd dep relate` instead
+- **`bd unrelate`** → use `bd dep unrelate` instead
+- **`bd daemons`** → use `bd daemon <subcommand>` instead
+- **`bd cleanup`** → use `bd admin cleanup` instead
+- **`bd compact`** → use `bd admin compact` instead
+- **`bd reset`** → use `bd admin reset` instead
+- **`bd comment`** → use `bd comments add` instead
+- **`bd template`** → use `bd mol` instead
+- **`bd templates`** → use `bd formula list` instead
+- **`bd template show`** → use `bd mol show` instead
+- **`bd template bond`** → use `bd mol bond` instead
+- **`bd detect-pollution`** → use `bd doctor --check=pollution` instead
+- **`bd migrate-hash-ids`** → use `bd migrate hash-ids` instead
+- **`bd migrate-tombstones`** → use `bd migrate tombstones` instead
+- **`bd migrate-sync`** → use `bd migrate sync` instead
+- **`bd migrate-issues`** → use `bd migrate issues` instead
+
+All deprecated commands continue to work but print a warning. Update your scripts
+and muscle memory before v1.0.0 to avoid breakage.
+
+### Changed
+
+- **Community tools documentation** (GH#772, GH#776)
+  - Consolidated into dedicated docs page
+  - Added opencode-beads to community tools list
+
+- **Activity feed improvements** - Better context
+  - Shows title and assignee in activity entries
+  - More informative `bd activity` output
+
+## [0.39.1] - 2025-12-27
+
+### Added
+
+- **`bd where` command** - Show active beads location
+  - Displays the resolved database path after following redirects
+  - Helpful for debugging multi-rig setups
+
+- **`--parent` flag for `bd update`** - Reparent issues
+  - Move issues between epics with `bd update <id> --parent=<new-parent>`
+  - Supports clearing parent with `--parent=none`
+
+- **Redirect info in `bd prime`** - Multi-clone support
+  - Shows when database is redirected to another location
+  - Improves visibility into routing behavior
+
+### Fixed
+
+- **Doctor follows redirects** - Multi-clone compatibility
+  - `bd doctor` now correctly follows database redirects
+  - Prevents false negatives when running from rig roots
+
+- **Remove 8-char prefix limit** (GH#770) - `bd rename-prefix`
+  - Removed arbitrary length restriction on issue prefixes
+  - Allows longer, more descriptive prefixes
+
+### Changed
+
+- **Git context consolidation** - Internal refactor
+  - Unified git context into single cached struct
+  - Reduces redundant git operations
+
+### Documentation
+
+- **Database Redirects section** - ADVANCED.md
+  - Comprehensive documentation for redirect feature
+  - Explains multi-clone integration patterns
+
+- **Community Tools update** (GH#771) - README.md
+  - Added opencode-beads to community tools list
+
+## [0.39.0] - 2025-12-27
+
+### Added
+
+- **`bd orphans` command** (GH#767) - Detect orphaned issues
+  - Finds issues mentioned in git commits that were never closed
+  - DRY refactoring of orphan detection from `bd doctor`
+  - Helps maintain issue hygiene in larger projects
+
+- **`bd admin` parent command** - Consolidated admin tools
+  - `bd admin cleanup` - Clean up unused data
+  - `bd admin compact` - Compact the database
+  - `bd admin reset` - Reset to initial state
+  - Reduces top-level command clutter
+
+- **`--prefix` flag for `bd create`** - Cross-rig issue creation
+  - Create issues in other rigs from any directory
+  - Accepts prefix (`bd-`), short form (`bd`), or rig name (`beads`)
+  - Works with existing routes.jsonl routing
+
+### Changed
+
+- **`bd mol catalog` → `bd formula list`** - Command rename
+  - Aligns with formula-based terminology
+  - `bd formula list` shows available molecule templates
+
+- **`bd info --thanks`** - Relocated thanks command
+  - Contributors list moved under `bd info`
+  - Reduces command namespace pollution
+
+- **Removed unused commands**
+  - `bd pin`, `bd unpin`, `bd hook` removed
+  - Functionality covered by orchestrator molecule commands
+  - Cleaner separation between beads (data) and orchestration
+
+- **`bd doctor --check=pollution`** - Integrated test pollution check
+  - Detects test artifacts left in production database
+  - Previously standalone `bd detect-pollution` command
+
+### Fixed
+
+- **macOS codesigning** - Fixed `bump-version.sh --install`
+  - Ad-hoc signing for local installations
+  - Prevents macOS from quarantining the binary
+
+- **Lint errors and Nix vendorHash** (GH#769)
+  - Resolved golangci-lint issues
+  - Updated Nix package hash for reproducible builds
+
+### Documentation
+
+- **Issue Statuses section** - CLI_REFERENCE.md
+  - Comprehensive status lifecycle documentation
+  - Clear explanations of open, pinned, in_progress, blocked, deferred, closed, tombstone
+
+- **Consolidated UI_PHILOSOPHY files** (GH#745)
+  - Merged duplicate philosophy docs
+  - Single source of truth for UI design principles
+
+- **README and PLUGIN.md fixes** (GH#763)
+  - Corrected installation instructions
+  - Updated plugin documentation
+
+## [0.38.0] - 2025-12-27
+
+### Added
+
+- **Prefix-based routing** - Cross-rig command routing
+  - `bd` commands auto-route to correct rig based on issue ID prefix
+  - Routes stored in `~/gt/.beads/routes.jsonl`
+  - Enables seamless multi-rig workflows from any directory
+
+- **Cross-rig ID auto-resolve** - Smarter dependency handling
+  - `bd dep add` auto-resolves issue IDs across different rigs
+  - No need to specify full paths for cross-rig dependencies
+
+- **`bd mol pour/wisp` subcommands** - Reorganized command hierarchy
+  - `bd mol pour` for persistent molecules
+  - `bd mol wisp` for ephemeral workflows
+  - Cleaner organization under `bd mol` namespace
+
+- **Comments display in `bd show`** (GH#177) - Enhanced issue details
+  - Comments now visible in issue output
+  - Shows full discussion thread for issues
+
+- **`created_by` field on issues** (GH#748) - Creator tracking
+  - Track who created each issue for audit trail
+  - Useful for multi-agent workflows
+
+- **Database corruption recovery** (GH#753) - Robust doctor repairs
+  - `bd doctor --fix` can now auto-repair corrupted SQLite databases
+  - JSONL integrity checks detect and fix malformed entries
+  - Git hygiene checks for stale branches
+
+- **Chaos testing for releases** - Thorough validation
+  - `--run-chaos-tests` flag in release script
+  - Exercises edge cases and failure modes
+
+- **Pre-commit config** - Local lint enforcement
+  - Consistent code quality before commits
+
+### Changed
+
+- **CLI consolidation** - Reduced top-level command clutter
+  - `bd cleanup`, `bd compact`, `bd reset` → `bd admin cleanup|compact|reset`
+  - `bd migrate-*` → `bd migrate hash-ids|issues|sync|tombstones`
+  - `bd cook` → `bd formula cook`
+  - `bd detect-pollution` → `bd doctor --check=pollution`
+  - `bd quickstart` hidden, use docs/QUICKSTART.md instead
+  - Hidden aliases maintain backwards compatibility with deprecation notices
+
+- **Sync backoff and tips consolidation** (GH#753) - Smarter daemon
+  - Daemon uses exponential backoff for sync retries
+  - Tips consolidated from multiple sources
+
+- **Wisp/Ephemeral naming finalized** - `wisp` is canonical
+  - `bd mol wisp` is the correct command
+  - Internal API uses "ephemeral" but CLI uses "wisp"
+
+### Fixed
+
+- **Comments display position** (GH#756) - Formatting fix
+  - Comments now display outside dependents block
+  - Proper visual hierarchy in `bd show` output
+
+- **no-db mode storeActive** (GH#761) - JSONL-only fix
+  - `storeActive` correctly set in no-database mode
+  - Fixes issues with JSONL-only installations
+
+- **`--resolution` alias** (GH#746) - Backwards compatibility
+  - Restored `--resolution` as alias for `--reason` on `bd close`
+
+- **`bd graph` with daemon** (GH#751) - Daemon compatibility
+  - Graph generation works when daemon is running
+  - No more conflicts between graph and daemon operations
+
+- **`created_by` in RPC path** (GH#754) - Daemon propagation
+  - Creator field correctly passed through daemon RPC
+
+- **Migration 028 idempotency** (GH#757) - Safe re-runs
+  - Migration handles partial or repeated runs gracefully
+  - Checks for existing columns before adding
+
+- **Routed ID daemon bypass** - Cross-rig show
+  - `bd show` with routed IDs bypasses daemon correctly
+  - Storage connections closed per iteration to prevent leaks
+
+- **Modern git init** (GH#753) - Test compatibility
+  - Tests use `--initial-branch=main` for modern git versions
+
+- **golangci-lint clean** (GH#753) - All platforms
+  - Resolved all lint errors across platforms
+
+### Improved
+
+- **Test coverage** - Comprehensive testing
+  - Doctor, daemon, storage, and RPC client paths covered
+  - Chaos testing integration for edge cases
+
+## [0.37.0] - 2025-12-26
+
+### Added
+
+- **Gate commands** - Async coordination for agent workflows
+  - `bd gate create` - Create gates with await conditions (gh:run, gh:pr, timer, human, mail)
+  - `bd gate eval` - Evaluate timer and GitHub gates (checks run completion, PR merge)
+  - `bd gate approve` - Approve human gates
+  - `bd gate show/list/close/wait` - Full gate lifecycle management
+
+- **`bd close --suggest-next`** (GH#679) - Smart workflow continuation
+  - Shows newly unblocked issues after closing
+  - Helps agents find next actionable work
+
+- **`bd ready/blocked --parent`** (GH#743) - Epic-scoped filtering
+  - Filter issues by parent bead or epic
+  - Enables focused work within a subtree
+
+- **TOML support for formulas** - Alternative format
+  - `.formula.toml` files alongside JSON support
+  - Human-friendly authoring option
+
+- **Fork repo auto-detection** (GH#742) - Contributor workflow
+  - Detects fork repositories during init
+  - Offers to configure .git/info/exclude for stealth mode
+
+- **Control flow operators** - Advanced formula composition
+  - `loop` operator for iterating over collections
+  - `gate` operator for conditional execution
+  - Condition evaluator for gates and loops
+  - Control flow integrates with aspect composition
+
+- **Aspect composition** - Cross-cutting workflow concerns
+  - `aspects` field in formulas for reusable patterns
+  - Aspects match steps by type, title pattern, or custom criteria
+  - Enables logging, retries, notifications as composable concerns
+
+- **Runtime expansion types** - Dynamic step generation
+  - `on_complete` - Generate steps when a step completes
+  - `for-each` - Expand steps for each item in a collection
+  - Enables dynamic workflows based on runtime state
+
+- **`bd formula list/show`** - Formula discovery commands
+  - `bd formula list` - List available formulas in search paths
+  - `bd formula show <name>` - Display formula definition and metadata
+
+- **`bd mol stale`** - Detect complete-but-unclosed molecules
+  - Finds molecules where all children are closed but molecule is open
+  - Helps identify forgotten cleanup tasks
+
+- **Stale molecules check in doctor** - Proactive detection
+  - `bd doctor` now warns about stale molecules
+  - Integrated with `bd mol stale` detection
+
+- **Distinct ID prefixes** - Clear entity type identification
+  - Protos: `bd-proto-xxx` prefix
+  - Molecules: `bd-mol-xxx` prefix
+  - Wisps: `bd-wisp-xxx` prefix
+  - Makes entity type immediately visible in IDs
+
+- **`no-git-ops` config** (GH#593) - Manual git control
+  - `bd config set no-git-ops true` to disable auto git operations
+  - `bd prime` outputs stealth-mode protocol when enabled
+  - Useful for custom git workflows or manual commit review
+
+### Changed
+
+- **Formula format: YAML → JSON** - Standardized format
+  - Formulas now use `.formula.json` extension
+  - JSON provides better tooling support and validation
+  - Existing YAML formulas need migration
+
+- **Removed `bd mol run`** - Orchestration delegated to orchestrator
+  - Molecule execution now handled by orchestrator commands
+  - `bd` focuses on issue tracking primitives
+  - Use orchestrator's molecule runner for execution
+
+- **Simplified wisp architecture** - Single database model
+  - Wisps stored in main database with `Wisp=true` flag
+  - Removed separate `.beads-wisp/` directory
+  - Wisps filtered from JSONL export automatically
+
+### Fixed
+
+- **Gate await fields preserved during upsert** - Multirepo sync
+  - Gate fields no longer cleared during multi-repo sync operations
+  - Enables reliable gate coordination across clones
+
+- **Tombstones retain closed_at timestamp** - Soft delete metadata
+  - Tombstones preserve the original close time
+  - Maintains accurate timeline for deleted issues
+
+- **Git detection caching** - Performance improvement
+  - Cache git worktree/repo detection results
+  - Eliminates repeated slowness on worktree checks
+
+- **Windows MCP graceful fallback** (GH#387) - Platform compatibility
+  - Daemon mode falls back gracefully on Windows
+  - Prevents crashes when daemon unavailable
+
+- **Windows npm postinstall file locking** (GH#670) - Install reliability
+  - Handles file lock errors during npm install
+  - Improves installation success on Windows
+
+- **installed_plugins.json v2 format** (GH#741) - Claude Code compatibility
+  - `bd doctor` now handles both v1 and v2 plugin file formats
+  - Fixes "cannot unmarshal array" error on newer Claude Code versions
+
+- **git.IsWorktree() hang on Windows** (GH#727) - Init safety
+  - Added isGitRepo() guard before calling git.IsWorktree()
+  - Fixes `bd init` hanging outside git repositories on Windows
+
+- **Skill files deleted by bd sync** (GH#738) - Sync safety
+  - `bd sync` no longer deletes skill files in .claude/
+  - Prevents accidental removal of Claude Code configuration
+
+- **doctor check false positives** (GH#709) - Cleaner diagnostics
+  - Skips interactions.jsonl and molecules.jsonl in sync checks
+  - These files are runtime state, not sync targets
+
+- **FatalErrorRespectJSON** - Consistent error output
+  - All commands respect `--json` flag for error output
+  - Errors return proper JSON structure when flag is set
+
+- **bd sync commits non-.beads files** - Sync isolation
+  - Sync operations now only commit .beads/ directory changes
+  - Prevents unintended commits of working directory files
+
+- **Content-level merge for divergence** - Better conflict resolution
+  - Divergence recovery uses content-level merging
+  - Reduces false conflicts during multi-clone sync
+
+- **Child→parent dep fix opt-in** - Migration control
+  - `--fix-child-parent` flag required for automatic fix
+  - Prevents unexpected dependency modifications
+
+- **Aspect self-matching recursion** - Formula safety
+  - Aspects cannot match themselves during expansion
+  - Prevents infinite recursion in aspect composition
+
+- **Map expansion nested matching** - Correct child handling
+  - Map expansion now correctly matches nested child steps
+  - Fixes missing expansions in hierarchical formulas
+
+- **Mol/wisp ID prefix combination** - Correct ID generation
+  - Database prefix combined with type prefix correctly
+  - IDs like `bd-mol-xxx` instead of `bdmol-xxx`
+
+- **mol run hierarchical children** (bd-c8d5, bd-drcx) - Complete loading
+  - `bd mol run` loads all hierarchical children
+  - Supports title lookup for molecule identification
+
+- **Wisps excluded from sync** (bd-687g, bd-9avq) - Export correctness
+  - Wisps filtered from JSONL export and nodb operations
+  - Ephemeral molecules don't pollute shared state
+
+### Documentation
+
+- **MOLECULES.md rewrite** - Workflow-first structure
+  - Reorganized around practical workflows
+  - Clearer distinction between protos, molecules, wisps
+
+- **Molecular chemistry docs** - Conceptual foundation
+  - Phase metaphor: solid (proto) → liquid (mol) → vapor (wisp)
+  - Pour, bond, distill, squash operations explained
+
+## [0.36.0] - 2025-12-24
+
+### Added
+
+- **Formula system** (bd-weu8, bd-wa2l) - Declarative workflow templates
+  - `bd cook <formula>` - Execute a formula template with variable interpolation
+  - Formula files (`.formula.json`) support inheritance via `extends`
+  - `needs` and `waits_for` fields for dependency declarations
+  - `--prefix` flag for custom issue prefix when cooking
+  - Search paths: `.beads/formulas/`, `~/.beads/formulas/`, `~/gt/.beads/formulas/`
+
+- **Gate issue type** - Async coordination primitives
+  - `bd gate create <name>` - Create a gate for coordinating parallel work
+  - `bd gate open <id>` - Open a gate (unblock waiters)
+  - `bd gate close <id>` - Close a gate (block new work)
+  - Gates integrate with `waits-for` dependencies for fanout patterns
+
+- **`bd list` viewer enhancements** (#729) - Built-in terminal UI
+  - `--pretty` - Colorized, formatted output for human viewing
+  - `--watch` - Live-updating view (refreshes on changes)
+
+- **`bd search` filters** - Enhanced search capabilities
+  - `--after`, `--before` - Date range filtering
+  - `--priority` - Exact priority match
+  - `--content` - Full-text content search
+
+- **`bd compact --prune`** - Standalone tombstone pruning
+  - Prune old tombstones without full compaction
+  - Configurable retention period
+
+- **`bd export --priority`** - Exact priority filter for exports
+
+- **`--resolution` alias** (GH#721) - Alternative to `--reason` on `bd close`
+  - `bd close bd-42 --resolution "Fixed in commit abc123"`
+
+- **Database size check in doctor** (#724) - Issue count threshold warnings
+  - Warns when issue count exceeds configurable threshold
+  - Helps identify when cleanup or compaction is needed
+
+- **Config override notifications** (#731) - Transparency for config sources
+  - Shows when environment variables override config file values
+  - Helps debug unexpected behavior from env overrides
+
+- **Windows code signing infrastructure** - Signed Windows binaries
+  - Code signing certificate integration for Windows releases
+  - Improved trust and installation experience on Windows
+
+- **RPC endpoints for monitoring** (bd-0oqz, bd-l13p)
+  - `GetMoleculeProgress` - Query molecule execution state
+  - `GetWorkerStatus` - Query worker health and current task
+
+- **Cross-database molecule spawning**
+  - `bd mol run` can spawn in external beads databases
+  - Enables cross-project workflow orchestration
+
+- **Config-based close hooks** - Custom scripts on issue close
+  - Configure hooks in `.beads/config.yaml`
+  - Run validation or notification scripts when issues close
+
+### Changed
+
+- **Removed `bd mol spawn`** - Use pour/wisp only
+  - `bd pour <proto>` for persistent molecules
+  - `bd wisp create <proto>` for ephemeral molecules
+  - Simplifies mental model: pour = liquid (persistent), wisp = vapor (ephemeral)
+
+- **`bd ready` excludes workflow types** - Cleaner ready queue
+  - Gates and other workflow coordination types excluded by default
+  - Use `--include-workflow` to see all types
+
+- **Natural language activation** (#718) - Improved Claude integration
+  - Enhanced activation patterns for natural language commands
+  - Anthropic 2025 API compliance updates
+
+### Fixed
+
+- **Dots in prefix handling** (GH#664) - SQLite extractParentChain fix
+  - Prefixes containing dots (e.g., `my.project`) now work correctly
+  - Parent chain extraction uses proper escaping
+
+- **allowed_prefixes config respected** - Import validation
+  - Import now respects `allowed_prefixes` configuration
+  - Prevents importing issues with unauthorized prefixes
+
+- **Child counter updates** (GH#728) - Explicit child ID creation
+  - `child_counters` table updated when explicit child IDs created
+  - Prevents ID collision when mixing auto and explicit child IDs
+
+- **Comment timestamps preserved** (#735) - Import fidelity
+  - `created_at` timestamps on comments preserved during import
+  - Maintains audit trail for imported issues
+
+- **sync.remote config respected** (#736) - Daemon sync operations
+  - Daemon respects configured remote for sync operations
+  - Fixes sync to wrong remote when multiple remotes configured
+
+- **Export requires -o flag** (#733) - Explicit output control
+  - `bd export` now requires `-o` flag to write to file
+  - Prevents accidental stdout pollution in scripts
+
+- **YAML config key normalization** (#732) - Consistent config parsing
+  - Config keys normalized to canonical format (snake_case)
+  - `sync.remote` and `sync_remote` both work
+
+- **JSON output standardization** - Consistent API
+  - Empty arrays return `[]` not `null`
+  - Error responses have consistent structure
+  - All commands with `--json` follow same patterns
+
+- **MCP Claude Code compatibility** - Tool schema fix
+  - Added `output_schema=None` to MCP tools
+  - Fixes "Invalid schema" errors in Claude Code
+
+- **Windows file locking** - Better Windows support
+  - Proper file handle cleanup prevents locking issues
+  - Fixes "file in use" errors on Windows
+
+- **Template commands with daemon** - Daemon mode compatibility
+  - `bd pour`, `bd wisp create` work correctly with daemon running
+
+- **Startup config to config.yaml** (GH#536) - Config persistence
+  - Startup wizard writes to config.yaml, not SQLite
+  - Configuration survives database recreation
+
+- **Multi-hyphen prefixes** (GH#422) - Prefix parsing
+  - Prefixes like `my-project-name` parsed correctly
+  - Fixes issue ID extraction with complex prefixes
+
+- **`--pour` flag in bond operations** - Phase control
+  - `bd mol bond --pour` correctly forces liquid phase
+
+- **Stealth mode gitignore** (GH#704) - Local-only exclusion
+  - Uses `.git/info/exclude` instead of global gitignore
+  - Stealth mode truly local to the repository
+
+- **Pinned field import** - Field preservation
+  - `pinned` field preserved during JSONL import
+
+- **External deps in orphan check** - Migration fix
+  - External dependencies excluded from orphan validation
+  - Fixes spurious migration warnings
+
+- **Child→parent dependency detection** - Prevents LLM temporal reasoning trap
+  - Epic children can no longer depend on their parent epic
+  - Blocks a common AI mistake: LLMs use temporal reasoning for "phases" and invert dependencies
+  - Example: "Phase 1 before Phase 2" triggers "Phase 1 blocks Phase 2" → WRONG
+  - Correct model: "Phase 2 needs Phase 1" → `bd dep add phase2 phase1`
+  - Clear error message explains the anti-pattern when detected
+
+### Improved
+
+- **Test coverage** - Significant improvements across codebase
+  - daemon: 27% → 72%
+  - compact: 17% → 82%
+  - setup: 28% → 54%
+  - storage: interface conformance tests
+  - RPC: comprehensive delete handler tests
+
+- **Structured logging** - Better observability
+  - Daemon uses `slog` for structured logging
+  - Consistent log format across components
+
+- **Code organization** - Modular refactoring
+  - Split `sync.go` into focused modules
+  - Split `queries.go` into focused modules
+  - Typed JSON response structs (no more `map[string]interface{}`)
+
+- **JSONL size reduction** - Smaller exports
+  - `omitempty` on all JSONL fields
+  - Removes null/empty values from exports
+
+## [0.35.0] - 2025-12-23
+
+### Added
+
+- **Dynamic molecule bonding** - Attach templates to running molecules at runtime
+  - `bd mol bond <proto> <target> --ref <issue-id>` - Inject template steps dynamically
+  - Enables responsive workflows: attach error recovery, expand scope mid-execution
+  - Templates can reference existing issue data via `--ref` for variable interpolation
+
+- **`bd activity` command** - Real-time state feed for workflow monitoring
+  - Stream mutation events as they happen (JSON format)
+  - Monitor molecule progress without polling
+  - Useful for dashboards, debugging, and automation
+
+- **`waits-for` dependency type** - Fanout coordination gates
+  - `bd dep add <gate> <step> --type waits-for` - Gate waits for all steps
+  - Unlike `blocks`, waits-for is used for parallel coordination (fan-in pattern)
+  - Gate unblocks only when ALL waits-for dependencies complete
+
+- **Parallel step detection** - Auto-identify parallelizable work
+  - Molecules automatically detect steps that can run concurrently
+  - `bd mol show` displays parallel-capable step groups
+  - Helps agents optimize execution order
+
+- **Molecule navigation commands** (bd-sal9, bd-ieyy) - Track progress through workflows
+  - `bd mol current` - Show current step and molecule progress
+  - `bd close --continue` - Auto-advance to next step in molecule
+  - `bd close --no-auto` - Close without auto-claiming next step
+
+- **`bd list --parent` flag** - Filter issues by parent
+  - `bd list --parent=bd-xyz --status=open` shows open children of bd-xyz
+  - Useful for epic progress tracking and molecule step listing
+
+- **Conditional bond type** - Run steps only when predecessors fail
+  - `bd mol bond --type conditional-blocks` for error-handling workflows
+  - Step B runs only if step A fails (useful for fallback paths)
+
+- **External dependency display** - Show cross-project deps in tree view
+  - `bd dep tree` now displays external dependencies with repo prefix
+  - Satisfied external deps filtered from blocked issues
+
+- **Performance optimization indexes** (bd-bha9, bd-a9y3) - Faster queries for large databases
+  - Added indexes for common query patterns
+  - Improved GetReadyWork and SearchIssues performance
+
+### Changed
+
+- **Consolidated doctor --fix** (GH#715, bd-bqcc) - Single command for all fixes
+  - `bd doctor --fix` now handles: hooks, permissions, sync branch, schema
+  - Removed individual `bd migrate`, `bd hooks install` suggestions
+  - Daemon health check integrated into doctor flow
+
+- **Auto_pull config** (GH#707) - Periodic remote sync in event-driven mode
+  - `bd config set daemon.auto_pull true` enables pull every 5 minutes
+  - Prevents staleness when git changes happen outside daemon's watch
+
+### Fixed
+
+- **Rich mutation events for status changes** - Events now include full context
+  - Status transitions emit complete before/after state
+  - Enables better monitoring and auditing
+
+- **External deps filtered from GetBlockedIssues** - Correct blocking calculation
+  - External dependencies no longer incorrectly block local work
+  - Only local blocking deps affect ready queue
+
+- **Parallel execution migration race** (GH#720) - Multiple daemons no longer corrupt DB
+  - Added file-based migration lock to prevent concurrent schema changes
+  - Retry logic when migration lock is held by another process
+
+- **bd create -f with daemon** (GH#719) - File flag now works in daemon mode
+  - `-f/--file` flag properly forwarded through RPC
+
+- **FindJSONLInDir interactions.jsonl** (GH#709) - No longer picks wrong file
+  - Skip `interactions.jsonl` when discovering JSONL files
+
+- **Daemon duplicate log messages** (PR#713) - Reduced log spam
+- **Worktree health check redundancy** (PR#711) - Integrated into CreateBeadsWorktree
+- **Diverged sync branch handling** (GH#697) - Auto-recovery on push failure
+- **Tombstones in JSONL export** (GH#696) - Deletions now propagate correctly
+
+### Refactored
+
+- Remove legacy autoflush code paths
+- Consolidate duplicate path-finding utilities
+- Replace map[string]interface{} with typed JSON structs
+- Migrate sort.Slice to slices.SortFunc
+- Add testEnv helpers, reduce SQLite test file sizes
+
 ## [0.34.0] - 2025-12-22
 
 ### Added
 
-- **Wisp commands** (bd-kwjh) - Full ephemeral molecule management
+- **Wisp commands** - Full ephemeral molecule management
   - `bd wisp create <proto>` - Instantiate proto as ephemeral wisp (solid→vapor)
   - `bd wisp list` - List all wisps with stale detection
   - `bd wisp gc` - Garbage collect orphaned wisps
-  - Wisps live in `.beads-wisp/` (gitignored), never sync to remote
+  - Wisps have Wisp=true flag and are not exported to JSONL (never sync)
 
 - **Chemistry UX commands** - Phase-aware molecule operations
   - `bd pour <proto>` - Instantiate proto as persistent mol (solid→liquid)
   - `bd mol bond --wisp` - Force spawn as vapor when attaching to mol
   - `bd mol bond --pour` - Force spawn as liquid when attaching to wisp
-  - Cross-store squash: condense wisp to digest in main storage
+  - Squash clears Wisp flag, promoting to persistent (exported to JSONL)
 
 - **Cross-project dependencies** (bd-66w1, bd-om4a) - Reference issues across repos
   - `external:<repo>:<id>` dependency syntax
@@ -29,7 +2876,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `bd ready` filters by external dependency satisfaction
   - Configure additional repos in `.beads/config.yaml`
 
-- **Orphan detection in bd doctor** (bd-5hrq) - Find issues with missing parents
+- **Orphan detection in bd doctor** - Find issues with missing parents
   - Detects parent-child relationships pointing to deleted issues
   - Suggests fix commands for orphaned issues
 
@@ -42,7 +2889,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Wisp storage initialization** - NewWispStorage now copies issue_prefix from main db
+- **Wisp flag handling** - Wisps now use Wisp=true flag in main database (not exported to JSONL)
 - **Prefix validation in multi-repo mode** (GH#686) - Skip validation for external repos
 - **Empty config values** (GH#680, GH#684) - Handle gracefully in getRepoConfig()
 - **Doctor UX improvements** (GH#687) - Better diagnostics and daemon integration
@@ -67,16 +2914,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Wisp molecules** (bd-2vh3) - Spawn molecules as wisps by default
-  - `bd mol spawn` creates wisp issues that live only in SQLite
+- **Wisp molecules** - Support for ephemeral wisps
+  - `bd wisp create` creates wisp issues that live only in SQLite
   - Wisp issues never export to JSONL (prevents zombie resurrection)
-  - Use `--persistent` flag to opt out of wisp spawning
+  - Use `bd pour` for persistent mols, `bd wisp create` for ephemeral wisps
   - `bd mol squash` compresses wisp children into a digest issue
   - `--summary` flag allows agents to provide AI-generated summaries
 
 ### Fixed
 
-- **Comments not deleted with issue** (bd-687g) - `DeleteIssue` now cascades to comments table
+- **Comments not deleted with issue** - `DeleteIssue` now cascades to comments table
 
 ## [0.32.1] - 2025-12-21
 
@@ -98,7 +2945,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Pin field not in allowed update fields** (gt-zr0a)
+- **Pin field not in allowed update fields**
   - `bd update --pinned` was failing with "invalid field" error
   - Added `pinned` to allowedUpdateFields and importer
 
@@ -124,7 +2971,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`bd defer` / `bd undefer` commands** (bd-4jr) - New "deferred" status for icebox issues
+- **`bd defer` / `bd undefer` commands** - New "deferred" status for icebox issues
   - Issues that are deliberately postponed, not blocked by dependencies
   - Deferred issues excluded from `bd ready` and shown with ❄️ snowflake styling
   - Full support in MCP server, graph views, and statistics
@@ -141,7 +2988,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `bd ready` and `bd list` auto-apply when in matching directories
   - Example: `packages/maverick: maverick` shows only maverick-labeled issues
 
-- **Molecules catalog** (gt-0ei3) - Separate storage for template molecules
+- **Molecules catalog** - Separate storage for template molecules
   - Templates now live in `molecules.jsonl`, distinct from work items
   - Hierarchical loading: built-in → town → user → project
   - Molecules use `mol-*` ID namespace with `is_template: true`
@@ -210,12 +3057,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`bd graph` dependency counts** (bd-6v2) - Graph command shows dependency counts using subgraph formatting
+- **`bd graph` dependency counts** - Graph command shows dependency counts using subgraph formatting
 - **`types.StatusPinned`** - New status for persistent beads that survive cleanup
 
 ### Fixed
 
-- **CRITICAL: Dependency resurrection bug** (bd-ndye) - Fixed 3-way merge to respect dependency removals
+- **CRITICAL: Dependency resurrection bug** - Fixed 3-way merge to respect dependency removals
   - `mergeDependencies` was using union (additive-only) instead of proper 3-way merge
   - Now removals are authoritative: if either left or right removes a dep, it stays removed
   - This prevented orphaned parent-child relationships from being permanently removed
@@ -233,7 +3080,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`bd template instantiate`** (bd-r6a.2) - Create beads issues from YAML workflow templates
+- **`bd template instantiate`** - Create beads issues from YAML workflow templates
   - `bd template instantiate <file.yaml>` - Create issues from workflow definitions
   - `--assignee <identity>` flag for auto-assignment during instantiation
   - Supports multi-issue workflows with dependency chains
@@ -250,8 +3097,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
-- **Legacy MCP Agent Mail integration** (bd-6gd) - Removed obsolete `mcp_agents` package
-- **YAML workflow execution system** (bd-r6a.1) - Replaced by simpler template instantiation
+- **Legacy MCP Agent Mail integration** - Removed obsolete `mcp_agents` package
+- **YAML workflow execution system** - Replaced by simpler template instantiation
 
 ### Notes
 
@@ -261,14 +3108,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Data loss race condition** (bd-b6xo) - Removed unsafe `ClearDirtyIssues()` method
+- **Data loss race condition** - Removed unsafe `ClearDirtyIssues()` method
   - Old method cleared ALL dirty issues, risking data loss if export failed partway
   - All code now uses `ClearDirtyIssuesByID()` which only clears exported issues
   - Affects: `internal/storage/sqlite/dirty.go`, `internal/storage/memory/memory.go`
 
 ### Closed (Already Implemented)
 
-- **Stale database warning** (bd-2q6d) - Commands now warn when database is out of sync with JSONL
+- **Stale database warning** - Commands now warn when database is out of sync with JSONL
 - **Staleness check error handling** (bd-n4td, bd-o4qy) - Proper warnings and error returns
 
 ## [0.30.2] - 2025-12-16
@@ -279,13 +3126,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Configure beads for use with Factory.ai's Droid
   - Contributed by @jordanhubbard
 
-- **Messaging schema fields** (bd-kwro.1) - Foundation for inter-agent messaging
+- **Messaging schema fields** - Foundation for inter-agent messaging
   - New `message` issue type for agent-to-agent communication
   - New fields: `sender`, `wisp`, `replies_to`, `relates_to`, `duplicate_of`, `superseded_by`
   - New dependency types: `replies-to`, `relates-to`, `duplicates`, `supersedes`
   - Schema migration 019 (automatic on first use)
 
-- **`bd mail` commands** (bd-kwro.6) - Inter-agent messaging
+- **`bd mail` commands** - Inter-agent messaging
   - `bd mail send <recipient> -s <subject> -m <body>` - Send messages
   - `bd mail inbox` - List open messages for your identity
   - `bd mail read <id>` - Display message content
@@ -293,21 +3140,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `bd mail reply <id> -m <body>` - Reply to messages (creates threads)
   - Identity via `BEADS_IDENTITY` env var or `.beads/config.json`
 
-- **Graph link commands** (bd-kwro.2-5) - Knowledge graph relationships
+- **Graph link commands** - Knowledge graph relationships
   - `bd relate <id1> <id2>` - Create bidirectional "see also" links
   - `bd unrelate <id1> <id2>` - Remove relates_to links
   - `bd duplicate <id> --of <canonical>` - Mark issue as duplicate (closes it)
   - `bd supersede <old> --with <new>` - Mark issue as superseded (closes it)
   - `bd show --thread` - View message threads via replies_to chain
 
-- **Hooks system** (bd-kwro.8) - Extensible event notifications
+- **Hooks system** - Extensible event notifications
   - `.beads/hooks/on_create` - Runs after issue creation
   - `.beads/hooks/on_update` - Runs after issue update
   - `.beads/hooks/on_close` - Runs after issue close
   - `.beads/hooks/on_message` - Runs after message send
   - Hooks receive issue ID, event type as args, full JSON on stdin
 
-- **`bd cleanup --wisp` flag** (bd-kwro.9) - Clean up transient messages
+- **`bd cleanup --wisp` flag** - Clean up transient messages
   - Deletes only closed issues with `wisp=true`
   - Useful for cleaning up messages after swarms complete
 
@@ -321,13 +3168,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
-- **Legacy deletions.jsonl code** (bd-fom) - Fully migrated to inline tombstones
+- **Legacy deletions.jsonl code** - Fully migrated to inline tombstones
   - Removed `deletions.jsonl` from git tracking
   - All deletion tracking now via inline tombstones in `issues.jsonl`
 
 ### Documentation
 
-- **Messaging documentation** (bd-kwro.11) - New docs for messaging system
+- **Messaging documentation** - New docs for messaging system
   - `docs/messaging.md` - Full messaging reference with examples
   - `docs/graph-links.md` - Graph link types and use cases
   - Updated `AGENTS.md` with inter-agent messaging section
@@ -381,20 +3228,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Add project notes that won't be committed
   - Gitignored by default
 
-- **Auto-add "landing the plane" instructions to AGENTS.md**
+- **Auto-add session completion instructions to AGENTS.md**
   - New projects get session-close protocol guidance
 
-- **Inline tombstones for soft-delete** (bd-vw8)
+- **Inline tombstones for soft-delete**
   - Deleted issues become tombstones with `status: "tombstone"` in `issues.jsonl`
   - Full audit trail: `deleted_at`, `deleted_by`, `delete_reason`, `original_type`
   - TTL-based expiration (default 30 days) with automatic pruning via `bd compact`
   - Proper 3-way merge support: fresh tombstones win, expired tombstones allow resurrection
 
-- **`bd migrate-tombstones` command** (bd-8f9)
+- **`bd migrate-tombstones` command**
   - Converts legacy `deletions.jsonl` entries to inline tombstones
   - Archives old file as `deletions.jsonl.migrated`
 
-- **Enhanced Git Worktree Support** (bd-737)
+- **Enhanced Git Worktree Support**
   - Shared `.beads` database across all worktrees
   - Worktree-aware database discovery
   - Git hooks automatically adapt to worktree context
@@ -445,38 +3292,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Enables planning and prioritization features in vscode-beads
 
 - **`bd doctor` improvements**
-  - SQLite integrity check (bd-2au) - Detects database corruption
-  - Configuration value validation (bd-alz) - Validates config settings
-  - Stale sync branch detection (bd-6rf) - Warns about abandoned beads-sync branches
-  - `--output` flag (bd-9cc) - Export diagnostics to file for sharing
-  - `--dry-run` flag (bd-qn5) - Preview fixes without applying
-  - Per-fix confirmation mode (bd-3xl) - Approve each fix individually
+  - SQLite integrity check - Detects database corruption
+  - Configuration value validation - Validates config settings
+  - Stale sync branch detection - Warns about abandoned beads-sync branches
+  - `--output` flag - Export diagnostics to file for sharing
+  - `--dry-run` flag - Preview fixes without applying
+  - Per-fix confirmation mode - Approve each fix individually
 
-- **`--readonly` flag (bd-ymo)** - Read-only mode for worker sandboxes
+- **`--readonly` flag** - Read-only mode for worker sandboxes
   - Blocks all write operations
   - Useful for parallel worker processes that should only read
 
 ### Fixed
 
 - **`bd sync` safety improvements**
-  - Auto-push after merge with safety check (bd-7ch)
-  - Handle diverged histories with content-based merge (bd-3s8)
+  - Auto-push after merge with safety check
+  - Handle diverged histories with content-based merge
   - Multiple safety check enhancements
 
-- **Auto-resolve merge conflicts deterministically (bd-6l8)**
+- **Auto-resolve merge conflicts deterministically**
   - All field conflicts resolved without prompts
   - Uses consistent rules for field-level merging
 
 - **3-char all-letter base36 hash support (GH #446)**
   - Fixes prefix extraction for edge case hashes like "bd-abc"
 
-- **`bd ready` message fix (bd-r4n)**
+- **`bd ready` message fix**
   - Shows correct message when all issues are closed
 
-- **Version notification spam fix (bd-tok)**
+- **Version notification spam fix**
   - Store version in gitignored .local_version file
 
-- **Nix flake vendorHash update (bd-gmf)**
+- **Nix flake vendorHash update**
   - Fixed build after dependency bumps
 
 ### Documentation
@@ -498,14 +3345,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Logs to stdout instead of background file
   - Process stays attached to terminal
 
-- **`bd migrate-sync` command (bd-epn)** - Migrate to sync.branch workflow
+- **`bd migrate-sync` command** - Migrate to sync.branch workflow
   - Moves beads data to a dedicated sync branch
   - Keeps main branch clean of .beads/ commits
   - Automated setup of sync.branch configuration
 
 ### Fixed
 
-- **Database Migration: close_reason column (bd-uyu)**
+- **Database Migration: close_reason column**
   - Added missing database column for close_reason field
   - Fixes sync loops where close_reason was lost on import/export
   - Automatic migration on first run
@@ -519,7 +3366,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `bd show` now displays epic children under "Children" not "Blocks"
   - Clearer UI labels for dependency relationships
 
-- **sync.branch Workflow Fixes (bd-epn)**
+- **sync.branch Workflow Fixes**
   - Fixed .beads/ restoration from branch after sync
   - Prevents final flush after sync.branch restore
   - `bd doctor` now detects when on sync branch
@@ -528,7 +3375,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Updated from deprecated Jira API v2 to v3
   - Fixes authentication issues with newer Jira instances
 
-- **Redundant Database Queries (bd-bbh)**
+- **Redundant Database Queries**
   - Removed extra GetCloseReason() calls after column migration
   - Improves query performance for issue retrieval
 
@@ -539,26 +3386,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Internal
 
-- Refactored daemon sync functions to reduce ~200 lines of duplication (bd-73u)
+- Refactored daemon sync functions to reduce ~200 lines of duplication
 - Consolidated local-only sync functions into shared implementation
 
 ## [0.27.2] - 2025-11-30
 
 ### Fixed
 
-- **CRITICAL: Prevent Mass Database Deletion on JSONL Reset (bd-t5m)**
+- **CRITICAL: Prevent Mass Database Deletion on JSONL Reset**
   - git-history-backfill now includes safety guard to prevent purging entire database
   - If >50% of issues would be deleted via git history, operation is aborted with warning
   - Threshold prevents accidental deletion when JSONL is reset (git reset, branch switch, etc.)
   - If 10-50% would be deleted, operation proceeds but shows warning message
   - Fixes bug where `git reset --hard origin/main` would lose all issues
 
-- **Fix Fresh Clone Initialization (bd-4h9)**
+- **Fix Fresh Clone Initialization**
   - `bd init` now works on fresh clones that have JSONL but no database
   - Auto-detects issue prefix from existing JSONL (no `--prefix` flag needed)
   - Prevents "database not found" errors on first run in a cloned repository
   
-- **Import Warning for Deleted Issues (bd-4zy)**
+- **Import Warning for Deleted Issues**
   - New warning message when issues are skipped due to deletions manifest
   - Helps users understand why expected issues aren't being imported
   - Warns user to check `bd deleted` for history of removed issues
@@ -573,12 +3420,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Custom Status States**: Define custom issue statuses via config (bd-1pj6)
+- **Custom Status States**: Define custom issue statuses via config
   - Configure project-specific statuses like `testing`, `blocked`, `review`
   - Status validation ensures only configured statuses are used
   - Backwards compatible: open/in_progress/closed always work
 
-- **Contributor Fork Workflows**: `bd init --contributor` now auto-configures `sync.remote=upstream` (bd-bx9)
+- **Contributor Fork Workflows**: `bd init --contributor` now auto-configures `sync.remote=upstream`
   - Syncs issues from upstream rather than origin
   - Ideal for contributors working on forks
 
@@ -587,27 +3434,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Helpful message when entering worktree repo without beads initialized
   - Hooks properly detect worktree vs main repository
 
-- **Daemon Health Checks**: Health monitoring in daemon event loop (bd-gqo)
+- **Daemon Health Checks**: Health monitoring in daemon event loop
   - Periodic health checks detect stale database state
   - Auto-recovery from detected inconsistencies
 
-- **Fresh Clone Detection**: `bd doctor` now detects fresh clones (bd-4ew)
+- **Fresh Clone Detection**: `bd doctor` now detects fresh clones
   - Suggests `bd init` when JSONL exists but no database
   - Improved onboarding experience for new contributors
 
-- **bd sync --squash**: Batch multiple sync commits into one (bd-o2e)
+- **bd sync --squash**: Batch multiple sync commits into one
   - Reduces commit noise when syncing frequently
   - Optional flag for cleaner git history
 
-- **Error Handling Helpers**: Extracted FatalError/WarnError utilities (bd-s0z)
+- **Error Handling Helpers**: Extracted FatalError/WarnError utilities
   - Consistent error formatting across codebase
   - Better error messages for users
 
 ### Fixed
 
 - **CRITICAL: Sync Corruption Prevention**: Multiple fixes prevent stale database from corrupting JSONL
-  - **Hash-based staleness detection** (bd-f2f): SHA256 hash comparison catches content mismatches
-  - **Reverse ZFC check** (bd-53c): Detects when JSONL has more issues than DB
+  - **Hash-based staleness detection**: SHA256 hash comparison catches content mismatches
+  - **Reverse ZFC check**: Detects when JSONL has more issues than DB
   - **Stale daemon connection** (eb4b81d): Prevents corruption from stale SQLite connections
   - Combined, these fixes eliminate the sync corruption bugs that affected v0.26.x
 
@@ -620,16 +3467,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **--from-main Sync Mode** (#418): Now defaults to `noGitHistory=true`
   - Prevents spurious deletions when syncing from main branch
 
-- **JSONL-Only Mode Detection**: Auto-detects when config has `no-db: true` (bd-5kj)
+- **JSONL-Only Mode Detection**: Auto-detects when config has `no-db: true`
   - Properly handles repositories using JSONL without SQLite
 
 - **Init Safety Guard**: Prevents overwriting existing JSONL data on init
   - Warns user when data already exists, requires confirmation
 
-- **Snapshot Cleanup** (bd-0io): Properly cleans up snapshot files after sync
+- **Snapshot Cleanup**: Properly cleans up snapshot files after sync
   - Removes `.beads/*.snapshot` files that could cause conflicts
 
-- **Daemon Registry Locking** (bd-5bj): Cross-process locking prevents registry corruption
+- **Daemon Registry Locking**: Cross-process locking prevents registry corruption
   - Fixes race conditions when multiple processes access daemon registry
 
 - **Doctor Merge Artifacts**: Excludes merge artifacts from "multiple JSONL" warning
@@ -653,7 +3500,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Hash-Based Staleness Detection (bd-f2f)**: Prevents stale DB from corrupting JSONL when counts match
+- **Hash-Based Staleness Detection**: Prevents stale DB from corrupting JSONL when counts match
   - Previous count-based check (0.26.1) missed cases where DB and JSONL had similar issue counts
   - New detection computes SHA256 hash of JSONL content and stores it after import
   - On export, compares current JSONL hash against stored hash to detect modifications
@@ -664,7 +3511,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **CRITICAL: Reverse ZFC Check (bd-53c)**: Prevents stale database from corrupting JSONL
+- **CRITICAL: Reverse ZFC Check**: Prevents stale database from corrupting JSONL
   - Root cause: `bd sync` exports DB to JSONL before pulling from remote
   - If local DB is stale (fewer issues than JSONL), stale data would corrupt the JSONL
   - Added reverse ZFC check: detects when JSONL has >20% more issues than DB
@@ -709,11 +3556,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Issue ID extraction now correctly handles multi-part prefixes
   - Example: `my-app-123` correctly extracts prefix `my-app`
 
-- **bd sync Commit Scope** (bd-red)
+- **bd sync Commit Scope**
   - `bd sync` now only commits `.beads/` files, not other staged files
   - Prevents accidental commits of unrelated staged changes
 
-- **Auto-Import to Wrong File** (bd-tqo)
+- **Auto-Import to Wrong File**
   - Fixed auto-import exporting to wrong JSONL file
   - FindJSONLPath now correctly skips deletions.jsonl
 
@@ -722,7 +3569,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - bd doctor no longer warns about deletions.jsonl
   - Prevent rebase failures from deletions.jsonl writes
 
-- **Defense-in-Depth** (bd-4t7)
+- **Defense-in-Depth**
   - Added additional check for --no-auto-import flag
 
 - **Tilde Expansion**: Global gitignore path now expands `~` correctly
@@ -777,7 +3624,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Deletion Propagation**: Deletions now sync across clones via deletions manifest (bd-imj)
+- **Deletion Propagation**: Deletions now sync across clones via deletions manifest
   - New `.beads/deletions.jsonl` tracks deleted issues with timestamp, actor, reason
   - Import automatically purges issues that were deleted in other clones
   - Git history fallback for pruned deletion records (self-healing)
@@ -792,7 +3639,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Useful for personal issue tracking in shared repos without affecting collaborators
   - All bd functionality works normally, just not committed to git
 
-- **Ephemeral Branch Sync**: New `bd sync --from-main` flag (gt-ick9)
+- **Ephemeral Branch Sync**: New `bd sync --from-main` flag
   - Syncs from main branch without pushing to remote
   - Ideal for feature branches that sync issues from main
   - Prevents pushing local branch changes to origin
@@ -801,7 +3648,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Transaction API**: Full transactional support for atomic multi-operation workflows (bd-8bq)
+- **Transaction API**: Full transactional support for atomic multi-operation workflows
   - New `storage.Transaction` interface with CreateIssue, UpdateIssue, CloseIssue, DeleteIssue
   - Dependency operations: AddDependency, RemoveDependency within transactions
   - Label operations: AddLabel, RemoveLabel with transactional semantics
@@ -810,51 +3657,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Automatic rollback on error or panic, commit on success
   - 1,147 lines of new implementation with comprehensive tests
 
-- **Tip System Infrastructure**: Smart contextual hints for users (bd-d4i)
+- **Tip System Infrastructure**: Smart contextual hints for users
   - Tips shown after successful commands (list, ready, create, show)
   - Condition-based filtering, priority ordering, probability rolls
   - Frequency limits prevent tip spam
   - Respects `--json` and `--quiet` flags
   - Deterministic testing via `BEADS_TIP_SEED` env var
 
-- **Sorting for bd list and bd search**: New `--sort` and `--reverse` flags (bd-22g)
+- **Sorting for bd list and bd search**: New `--sort` and `--reverse` flags
   - Sort by: priority, created, updated, closed, status, id, title, type, assignee
   - Smart defaults: priority ascending (P0 first), dates descending (newest first)
   - Works with all existing filters
 
-- **Claude Integration Verification**: New bd doctor checks (bd-o78)
+- **Claude Integration Verification**: New bd doctor checks
   - `CheckBdInPath`: verifies 'bd' is in PATH (needed for hooks)
   - `CheckDocumentationBdPrimeReference`: detects version mismatches in docs
 
 - **ARM Linux Support**: GoReleaser now builds for linux/arm64 (PR #371 by @tjg184)
   - Enables bd on ARM-based Linux systems like Raspberry Pi, AWS Graviton
 
-- **Orphan Detection Migration**: Identifies orphaned child issues (bd-3852)
+- **Orphan Detection Migration**: Identifies orphaned child issues
   - Detects issues with hierarchical IDs where parent no longer exists
   - Logs suggestions: delete, convert to standalone, or restore parent
   - Idempotent and safe to run multiple times
 
 ### Fixed
 
-- **Transaction Cache Invalidation**: blocked_issues_cache now invalidates correctly (bd-1c4h)
+- **Transaction Cache Invalidation**: blocked_issues_cache now invalidates correctly
   - UpdateIssue status changes trigger cache invalidation
   - CloseIssue always invalidates (closed issues don't block)
   - AddDependency/RemoveDependency invalidate for blocking types
 
-- **SQLITE_BUSY Retry Logic**: Exponential backoff for concurrent writes (bd-ola6)
+- **SQLITE_BUSY Retry Logic**: Exponential backoff for concurrent writes
   - `beginImmediateWithRetry()` with 5 retries (10ms, 20ms, 40ms, 80ms, 160ms)
   - Eliminates spurious failures under normal concurrent usage
   - Context cancellation respected between retry attempts
 
-- **bd import Argument Validation**: Helpful error for common mistake (bd-77gm)
+- **bd import Argument Validation**: Helpful error for common mistake
   - Running `bd import file.jsonl` (without `-i`) now shows clear error
   - Previously silently read from stdin, confusing users with "0 created"
 
-- **ZFC Import Export Skip**: Preserve JSONL source of truth (bd-l0r)
+- **ZFC Import Export Skip**: Preserve JSONL source of truth
   - After stale DB import from JSONL, skip export to avoid overwriting
   - Fixes scenario where DB with fewer issues would overwrite JSONL
 
-- **Daemon Reopen with Reason**: `--reason` flag now works in daemon mode (bd-r46)
+- **Daemon Reopen with Reason**: `--reason` flag now works in daemon mode
   - Previously ignored in daemon RPC calls
 
 - **Windows Test Failures**: Skip file permission tests on Windows
@@ -863,7 +3710,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **bd daemon UX**: New `--start` flag, help text when no args (bd-gfu)
+- **bd daemon UX**: New `--start` flag, help text when no args
   - `bd daemon` now shows help instead of immediately starting
   - Use `bd daemon --start` to explicitly start
   - Auto-start still works (uses `--start` internally)
@@ -872,8 +3719,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Documentation
 
 - **blocked_issues_cache Architecture**: Document cache behavior and invalidation
-- **Antivirus False Positives**: Guide for handling security software alerts (bd-t4u1)
-- **import.orphan_handling**: Complete documentation (bd-9cdc)
+- **Antivirus False Positives**: Guide for handling security software alerts
+- **import.orphan_handling**: Complete documentation
 - **Error Handling Patterns**: Comprehensive audit and guidelines
 
 ### Dependencies
@@ -1159,7 +4006,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Improved code quality and safety
   - Better coverage of edge cases
 
-- **Shared Database Pattern**: Refactored multiple test files to use shared DB pattern (bd-1rh)
+- **Shared Database Pattern**: Refactored multiple test files to use shared DB pattern
   - compact_test.go, integrity_test.go, validate_test.go, epic_test.go, duplicates_test.go
   - Improved test consistency and maintainability
   - Faster test execution through better resource sharing
@@ -1484,42 +4331,42 @@ This release represents a major stability and performance improvement with **179
   - Automated git traffic benchmark showing **98.5% reduction in git traffic** compared to git-only sync
   - Bash-agent integration example
 
-- **bd info --whats-new** (bd-eiz9): Agent version awareness for quick upgrade summaries
+- **bd info --whats-new**: Agent version awareness for quick upgrade summaries
   - Shows last 3 versions with workflow-impacting changes
   - Supports `--json` flag for machine-readable output
   - Helps agents understand what changed without re-reading full docs
 
-- **bd hooks install** (bd-908z): Embedded git hooks command
+- **bd hooks install**: Embedded git hooks command
   - Replaces external install script with native command
   - Git hooks now embedded in bd binary
   - Works for all bd users, not just source repo users
 
-- **bd cleanup**: Bulk deletion command for closed issues (bd-buol)
+- **bd cleanup**: Bulk deletion command for closed issues
   - Agent-driven compaction for large databases
   - Removes closed issues older than specified threshold
 
 ### Fixed
 
-- **3-way JSONL Merge** (bd-jjua): Auto-invoked on conflicts
+- **3-way JSONL Merge**: Auto-invoked on conflicts
   - Automatically triggers intelligent merge on JSONL conflicts
   - No manual intervention required
   - Warning message added to zombie issues.jsonl file
 
 - **Auto-import on Missing Database** (ab4ec90): `bd import` now auto-initializes database when missing
-- **Daemon Crash Recovery** (bd-vcg5): Panic handler with socket cleanup prevents orphaned processes
-- **Stale Database Exports** (bd-srwk): ID-based staleness detection prevents exporting stale data
-- **Windows MCP Subprocess Timeout** (bd-r79z): Fix for git detection on Windows
+- **Daemon Crash Recovery**: Panic handler with socket cleanup prevents orphaned processes
+- **Stale Database Exports**: ID-based staleness detection prevents exporting stale data
+- **Windows MCP Subprocess Timeout**: Fix for git detection on Windows
 - **Daemon Orphaning** (a6c9579): Track parent PID and exit when parent dies
 - **Test Pollution Prevention** (bd-z528, bd-2c5a): Safeguards to prevent test issues in production database
 - **Client Self-Heal** (a236558): Auto-recovery for stale daemon.pid files
 - **Post-Merge Hook Error Messages** (abb1d1c): Show actual error messages instead of silent failures
-- **Auto-import During Delete** (bd-8kde): Disable auto-import during delete operations to prevent conflicts
-- **MCP Workspace Context** (bd-8zf2): Auto-detect workspace from CWD
-- **Import Sync Warning** (bd-u4f5): Warn when import syncs with working tree but not git HEAD
-- **GH#254** (bd-tuqd): `bd init` now detects and chains with existing git hooks
+- **Auto-import During Delete**: Disable auto-import during delete operations to prevent conflicts
+- **MCP Workspace Context**: Auto-detect workspace from CWD
+- **Import Sync Warning**: Warn when import syncs with working tree but not git HEAD
+- **GH#254**: `bd init` now detects and chains with existing git hooks
 - **GH#249**: Add nil storage checks to prevent RPC daemon crashes
 - **GH#252**: Fix SQLite driver name mismatch causing "unknown driver" errors
-- **Nested .beads Directories** (bd-eqjc): Prevent creating nested .beads directories
+- **Nested .beads Directories**: Prevent creating nested .beads directories
 - **Windows SQLite Support**: Fix SQLite in releases for Windows
 
 ### Changed
@@ -1535,14 +4382,14 @@ This release represents a major stability and performance improvement with **179
   - Config included in `bd info` JSON output
   - Python cache files added to .gitignore
   - RPC diagnostics available via `BD_RPC_DEBUG` env var
-  - Reduced RPC dial timeout from 2s to 200ms for fast-fail (bd-expt)
-  - Standardized daemon detection with tryDaemonLock probe (bd-wgu4)
+  - Reduced RPC dial timeout from 2s to 200ms for fast-fail
+  - Standardized daemon detection with tryDaemonLock probe
   - Improved internal/daemon test coverage to 60%
 
 - **Code Organization**:
-  - Refactored snapshot management into dedicated module (bd-urob)
-  - Documented external_ref in content hash behavior (bd-9f4a)
-  - Added MCP server functions for repair commands (bd-7bbc4e6a)
+  - Refactored snapshot management into dedicated module
+  - Documented external_ref in content hash behavior
+  - Added MCP server functions for repair commands
   - Added version number to beads-mcp startup log
   - Added system requirements section for glibc compatibility in docs
 
@@ -1560,7 +4407,7 @@ This release represents a major stability and performance improvement with **179
 
 ### Added
 
-- **Vendored beads-merge by @neongreen** (bd-bzfy): Native `bd merge` command for intelligent JSONL merging
+- **Vendored beads-merge by @neongreen**: Native `bd merge` command for intelligent JSONL merging
   - Vendored beads-merge algorithm into `internal/merge/` with full attribution and MIT license
   - New `bd merge` command as native wrapper (no external binary needed)
   - Same field-level 3-way merge algorithm, now built into bd
@@ -1652,7 +4499,7 @@ This release represents a major stability and performance improvement with **179
   - Pre-configured Go environment with bd pre-installed
   - Auto-detects existing `.beads/` and imports on startup
 
-- **Landing the Plane Protocol** (095e40d): Session-ending checklist for AI agents
+- **Session Completion Protocol** (095e40d): Session-ending checklist for AI agents
   - Quality gates, sync procedures, git cleanup
   - Ensures clean handoff between sessions
 
@@ -1763,7 +4610,7 @@ This release represents a major stability and performance improvement with **179
 
 ### Added
 
-- **Parent Resurrection** (bd-58c0): Automatic resurrection of deleted parent issues from JSONL history
+- **Parent Resurrection**: Automatic resurrection of deleted parent issues from JSONL history
   - Prevents import failures when parent issues have been deleted
   - Creates tombstone placeholders for missing hierarchical parents
   - Best-effort dependency resurrection from JSONL
@@ -1786,7 +4633,7 @@ This release represents a major stability and performance improvement with **179
 
 ### Fixed
 
-- **Memory Database Connection Pool** (bd-b121): Fixed `:memory:` database handling to use single shared connection
+- **Memory Database Connection Pool**: Fixed `:memory:` database handling to use single shared connection
   - Prevents "no such table" errors when using in-memory databases
   - Ensures connection pool reuses the same in-memory instance
   - Critical fix for event-driven daemon mode tests
@@ -1799,16 +4646,16 @@ This release represents a major stability and performance improvement with **179
 
 ### Added
 
-- **npm Package** (bd-febc): Created `@beads/bd` npm package for Node.js/Claude Code for Web integration
+- **npm Package**: Created `@beads/bd` npm package for Node.js/Claude Code for Web integration
   - Native binary downloads from GitHub releases
   - Integration tests and release documentation
   - Postinstall script for platform-specific binary installation
 
-- **Template Support** (bd-164b): Issue creation from markdown templates
+- **Template Support**: Issue creation from markdown templates
   - Create multiple issues from a single file
   - Structured format for bulk issue creation
 
-- **`bd comment` Alias** (bd-d3f0): Convenient shorthand for `bd comments add`
+- **`bd comment` Alias**: Convenient shorthand for `bd comments add`
 
 ### Changed
 
@@ -1818,7 +4665,7 @@ This release represents a major stability and performance improvement with **179
 
 ### Fixed
 
-- **SQLite URI Handling** (bd-c54b): Fixed `file://` URI scheme to prevent query params in filename
+- **SQLite URI Handling**: Fixed `file://` URI scheme to prevent query params in filename
   - Prevents database corruption from malformed URIs
   - Fixed `:memory:` database connection strings
 
@@ -1852,30 +4699,30 @@ This release represents a major stability and performance improvement with **179
 ### Added
 
 - **New Commands**:
-  - `bd status` - Database overview command showing issue counts and stats (bd-28db)
-  - `bd comment` - Convenient alias for `bd comments add` (bd-d3f0)
+  - `bd status` - Database overview command showing issue counts and stats
+  - `bd comment` - Convenient alias for `bd comments add`
   - `bd daemons restart` - Restart specific daemon without manual kill/start
   - `--json` flag for `bd stale` command
 
 - **Protected Branch Workflow**:
-  - `BEADS_DIR` environment variable for custom database location (bd-e16b)
-  - `sync.branch` configuration for protected branch workflows (bd-b7d2)
-  - Git worktree management with sparse checkout for sync branches (bd-a4b5)
+  - `BEADS_DIR` environment variable for custom database location
+  - `sync.branch` configuration for protected branch workflows
+  - Git worktree management with sparse checkout for sync branches
     - Only checks out `.beads/` in worktrees, minimal disk usage
     - Only used when `sync.branch` is configured, not for default users
   - Comprehensive protected branch documentation
 
 - **Migration & Validation**:
-  - Migration inspection tools for AI agents (bd-627d)
+  - Migration inspection tools for AI agents
   - Conflict marker detection in `bd import` and `bd validate`
   - Git hooks health check in `bd doctor`
   - External reference (`external_ref`) UNIQUE constraint and validation
-  - `external_ref` now primary matching key for import updates (bd-1022)
+  - `external_ref` now primary matching key for import updates
 
 ### Fixed
 
 - **Critical Fixes**:
-  - Daemon corruption from git conflicts (bd-8931)
+  - Daemon corruption from git conflicts
   - MCP `set_context` hangs with stdio transport (GH #153)
   - Double-release race condition in `importInProgress` flag
   - Critical daemon race condition causing stale exports
@@ -1886,9 +4733,9 @@ This release represents a major stability and performance improvement with **179
   - Config version update in migrate command
 
 - **Daemon & RPC**:
-  - `bd doctor --json` flag not working (bd-6049)
-  - `bd import` now flushes JSONL immediately for daemon visibility (bd-47f1)
-  - Panic recovery in RPC `handleConnection` (bd-1048)
+  - `bd doctor --json` flag not working
+  - `bd import` now flushes JSONL immediately for daemon visibility
+  - Panic recovery in RPC `handleConnection`
   - Daemon auto-upgrades database version instead of exiting
 
 - **Windows Compatibility**:
@@ -1967,10 +4814,10 @@ See README.md for hash ID format details and birthday paradox collision analysis
   - Migration tool: `bd migrate --to-hash-ids` for existing databases
   - Prefix-optional ID parsing (e.g., `bd-abc123` or just `abc123`)
   - Hierarchical child ID generation for discovered-from relationships
-- **Substring ID Matching**: All bd commands now support partial ID matching (bd-170)
+- **Substring ID Matching**: All bd commands now support partial ID matching
   - `bd show abc` matches any ID containing "abc" (e.g., `bd-abc123`)
   - Ambiguous matches show helpful error with all candidates
-- **Daemon Registry**: Multi-daemon management for multiple workspaces (bd-07b8c8)
+- **Daemon Registry**: Multi-daemon management for multiple workspaces
   - `bd daemons list` shows all running daemons across workspaces
   - `bd daemons health` detects version mismatches and stale sockets
   - `bd daemons logs <workspace>` for per-daemon log viewing
@@ -2000,7 +4847,7 @@ See README.md for hash ID format details and birthday paradox collision analysis
 ## [0.17.2] - 2025-10-25
 
 ### Added
-- **Configurable Sort Policy**: `bd ready --sort` flag for work queue ordering (bd-147)
+- **Configurable Sort Policy**: `bd ready --sort` flag for work queue ordering
   - `hybrid` (default): Priority-weighted by staleness
   - `priority`: Strict priority ordering for autonomous systems
   - `oldest`: Pure FIFO for long-tail work
@@ -2009,25 +4856,25 @@ See README.md for hash ID format details and birthday paradox collision analysis
   - `scripts/update-homebrew.sh`: Automated Homebrew formula updates
 
 ### Fixed
-- **Critical**: Database reinitialization test re-landed with CI fixes (bd-130)
+- **Critical**: Database reinitialization test re-landed with CI fixes
   - Windows: Fixed git path handling (forward slash normalization)
   - Nix: Skip test when git unavailable
   - JSON: Increased scanner buffer to 64MB for large issues
-- **Bug**: Stale daemon socket detection (bd-137)
+- **Bug**: Stale daemon socket detection
   - MCP server now health-checks cached connections before use
   - Auto-reconnect with exponential backoff on stale sockets
   - Handles daemon restarts/upgrades gracefully
-- **Linting**: Fixed all errcheck warnings in production code (bd-58)
+- **Linting**: Fixed all errcheck warnings in production code
   - Proper error handling for database resources and transactions
   - Graceful EOF handling in interactive input
-- **Linting**: Fixed revive style issues (bd-56)
+- **Linting**: Fixed revive style issues
   - Removed unused parameters, renamed builtin shadowing
-- **Linting**: Fixed goconst warnings (bd-116)
+- **Linting**: Fixed goconst warnings
 
 ## [0.17.0] - 2025-10-24
 
 ### Added
-- **Git Hooks**: Automatic installation prompt during `bd init` (bd-51)
+- **Git Hooks**: Automatic installation prompt during `bd init`
   - Eliminates race condition between auto-flush and git commits
   - Pre-commit hook: Flushes pending changes immediately before commit
   - Post-merge hook: Imports updated JSONL after pull/merge
@@ -2043,7 +4890,7 @@ See README.md for hash ID format details and birthday paradox collision analysis
   - Enables hybrid workflows with Jira, GitHub, Linear
   - Updates existing issues instead of creating duplicates
   - Database index on `external_ref` for fast lookups
-- **Multi-Database Warning**: Detect and warn about nested beads databases (bd-75)
+- **Multi-Database Warning**: Detect and warn about nested beads databases
   - Prevents accidental creation of multiple databases in hierarchy
   - Helps users avoid confusion about which database is active
 
@@ -2058,7 +4905,7 @@ See README.md for hash ID format details and birthday paradox collision analysis
 - **Critical**: Install script safety (GH #143 by @marcodelpin)
   - Prevents shell corruption from directory deletion during install
   - Restored proper error codes for safer installation
-- **Bug**: Daemon auto-start reliability (bd-137)
+- **Bug**: Daemon auto-start reliability
   - Daemon now responsive immediately, runs initial sync in background
   - Fixes timeout issues when git pull is slow
   - Skip daemon-running check for forked child process
@@ -2093,19 +4940,19 @@ See README.md for hash ID format details and birthday paradox collision analysis
 ## [0.16.0] - 2025-10-23
 
 ### Added
-- **Automated Releases**: GoReleaser workflow for cross-platform binaries (bd-46)
+- **Automated Releases**: GoReleaser workflow for cross-platform binaries
   - Automatic GitHub releases on version tags
   - Linux, macOS, Windows binaries for amd64 and arm64
   - Checksums and changelog generation included
 - **PyPI Automation**: Automated MCP server publishing to PyPI
   - GitHub Actions workflow publishes beads-mcp on version tags
   - Eliminates manual PyPI upload step
-- **Sandbox Mode**: `--sandbox` flag for Claude Code integration (bd-35)
+- **Sandbox Mode**: `--sandbox` flag for Claude Code integration
   - Isolated environment for AI agent experimentation
   - Prevents production database modifications during testing
 
 ### Fixed
-- **Critical**: Idempotent import timestamp churn (bd-84)
+- **Critical**: Idempotent import timestamp churn
   - Prevents timestamp updates when issue content unchanged
   - Reduces JSONL churn and git noise from repeated imports
 - **Bug**: Windows CI test failures (bd-60, bd-99)
@@ -2148,18 +4995,18 @@ See README.md for hash ID format details and birthday paradox collision analysis
 ## [0.14.0] - 2025-10-22
 
 ### Added
-- **Lifecycle Safety Documentation**: Complete documentation for UnderlyingDB() usage (bd-64)
+- **Lifecycle Safety Documentation**: Complete documentation for UnderlyingDB() usage
   - Added tracking guidelines for database lifecycle safety
   - Documented transaction management best practices
   - Prevents UAF (use-after-free) bugs in extensions
 
 ### Fixed
-- **Critical**: Git worktree detection and warnings (bd-73)
+- **Critical**: Git worktree detection and warnings
   - Added automatic detection when running in git worktrees
   - Displays prominent warning if daemon mode is active in worktree
   - Prevents daemon from committing/pushing to wrong branch
   - Documents `--no-daemon` flag as solution for worktree users
-- **Critical**: Multiple daemon race condition (bd-54)
+- **Critical**: Multiple daemon race condition
   - Implemented file locking (`daemon.lock`) to prevent multiple daemons per repository
   - Uses `flock` on Unix, `LockFileEx` on Windows for process-level exclusivity
   - Lock held for daemon lifetime, automatically released on exit
@@ -2200,7 +5047,7 @@ See README.md for hash ID format details and birthday paradox collision analysis
   - `bd close`: Close multiple issues with one command
   - `bd reopen`: Reopen multiple issues together
   - Example: `bd close bd-1 bd-2 bd-3 --reason "Done"`
-- **Daemon RPC Improvements**: Enhanced sync operations (bd-2)
+- **Daemon RPC Improvements**: Enhanced sync operations
   - `bd sync` now works correctly in daemon mode
   - Export operations properly supported via RPC
   - Prevents database access conflicts during sync
@@ -2214,30 +5061,30 @@ See README.md for hash ID format details and birthday paradox collision analysis
   - Fixed stress test issues writing 1000+ test issues to production
   - Quarantined RPC benchmarks to prevent pollution
   - Added database isolation canary tests
-- **Critical**: Daemon cache staleness (bd-49)
+- **Critical**: Daemon cache staleness
   - Daemon now detects external database modifications via mtime check
   - Prevents serving stale data after external `bd import`, `rm bd.db`, etc.
   - Cache automatically invalidates when DB file changes
-- **Critical**: Counter desync after deletions (bd-49)
+- **Critical**: Counter desync after deletions
   - Issue counters now sync correctly after bulk deletions
   - Prevents ID gaps and counter drift
 - **Critical**: Labels and dependencies not persisted in daemon mode (#101)
   - Fixed label operations failing silently in daemon mode
   - Fixed dependency operations not saving in daemon mode
   - Both now correctly propagate through RPC layer
-- **Daemon sync support**: `bd sync` command now works in daemon mode (bd-2)
+- **Daemon sync support**: `bd sync` command now works in daemon mode
   - Previously crashed with nil pointer when daemon running
   - Export operations now properly routed through RPC
 - **Acceptance flag normalization**: Unified `--acceptance` flag behavior (bd-228, #102)
   - Added `--acceptance-criteria` as clearer alias
   - Both flags work identically for backward compatibility
-- **Auto-import Git conflicts**: Better detection of merge conflicts (bd-270)
+- **Auto-import Git conflicts**: Better detection of merge conflicts
   - Auto-import detects and warns about unresolved Git merge conflicts
   - Prevents importing corrupted JSONL with conflict markers
   - Clear instructions for resolving conflicts
 
 ### Changed
-- **BREAKING**: Removed global daemon socket fallback (bd-231)
+- **BREAKING**: Removed global daemon socket fallback
   - Each project now must use its own local daemon (.beads/bd.sock)
   - Prevents cross-project daemon connections and database pollution
   - Migration: Stop any global daemon and restart with `bd daemon` in each project
@@ -2253,7 +5100,7 @@ See README.md for hash ID format details and birthday paradox collision analysis
 ## [0.10.0] - 2025-10-20
 
 ### Added
-- **Agent Onboarding**: New `bd onboard` command for agent-first documentation (bd-173)
+- **Agent Onboarding**: New `bd onboard` command for agent-first documentation
   - Outputs structured instructions for agents to integrate bd into documentation
   - Bootstrap workflow: Add 'BEFORE ANYTHING ELSE: run bd onboard' to AGENTS.md
   - Agent adapts instructions to existing project structure
@@ -2278,7 +5125,7 @@ See README.md for hash ID format details and birthday paradox collision analysis
 ## [0.9.10] - 2025-10-18
 
 ### Added
-- **Label Filtering**: Enhanced `bd list` command with label-based filtering (bd-161)
+- **Label Filtering**: Enhanced `bd list` command with label-based filtering
   - `--label` (or `-l`): Filter by multiple labels with AND semantics (must have ALL)
   - `--label-any`: Filter by multiple labels with OR semantics (must have AT LEAST ONE)
   - Examples:
@@ -2286,12 +5133,12 @@ See README.md for hash ID format details and birthday paradox collision analysis
     - `bd list --label-any frontend,backend`: Issues with either 'frontend' OR 'backend'
   - Works in both daemon and direct modes
   - Includes comprehensive test coverage
-- **Log Rotation**: Automatic daemon log rotation with configurable limits (bd-154)
+- **Log Rotation**: Automatic daemon log rotation with configurable limits
   - Prevents unbounded log file growth for long-running daemons
   - Configurable via environment variables: `BEADS_DAEMON_LOG_MAX_SIZE`, `BEADS_DAEMON_LOG_MAX_BACKUPS`, `BEADS_DAEMON_LOG_MAX_AGE`, `BEADS_DAEMON_LOG_COMPRESS`
   - Optional compression of rotated logs
   - Defaults: 50MB max size, 7 backups, 30 day retention, compression enabled
-- **Batch Deletion**: Enhanced `bd delete` command with batch operations (bd-127)
+- **Batch Deletion**: Enhanced `bd delete` command with batch operations
   - Delete multiple issues at once: `bd delete bd-1 bd-2 bd-3 --force`
   - Read from file: `bd delete --from-file deletions.txt --force`
   - Dry-run mode: `--dry-run` to preview deletions before execution
@@ -2301,7 +5148,7 @@ See README.md for hash ID format details and birthday paradox collision analysis
   - Comprehensive statistics: tracks deleted issues, dependencies, labels, and events
 
 ### Fixed
-- **Critical**: `bd list --status all` showing 0 issues (bd-148)
+- **Critical**: `bd list --status all` showing 0 issues
   - Status filter now treats "all" as special value meaning "show all statuses"
   - Previously treated "all" as literal status value, matching no issues
 
@@ -2326,25 +5173,25 @@ See README.md for hash ID format details and birthday paradox collision analysis
   - Useful for project rebranding or namespace changes
 - **Comprehensive Testing**: Added scripttest-based integration tests (#59)
   - End-to-end coverage for CLI workflows
-  - Tests for init command edge cases (bd-70)
+  - Tests for init command edge cases
 
 ### Fixed
-- **Critical**: Metadata errors causing crashes on first import (bd-663)
+- **Critical**: Metadata errors causing crashes on first import
   - Auto-import now treats missing metadata as first import instead of failing
   - Eliminates initialization errors in fresh repositories
-- **Critical**: N+1 query pattern in auto-import (bd-666)
+- **Critical**: N+1 query pattern in auto-import
   - Replaced per-issue queries with batch fetching
   - Dramatically improves performance for large imports
-- **Critical**: Duplicate issue imports (bd-421)
+- **Critical**: Duplicate issue imports
   - Added deduplication logic to prevent importing same issue multiple times
   - Maintains data integrity during repeated imports
-- **Bug**: Auto-flush missing after renumber/rename-prefix (bd-346)
+- **Bug**: Auto-flush missing after renumber/rename-prefix
   - Commands now properly export to JSONL after completion
   - Ensures git sees latest changes immediately
-- **Bug**: Renumber ID collision with UUID temp IDs (bd-345)
+- **Bug**: Renumber ID collision with UUID temp IDs
   - Uses proper UUID-based temporary IDs to prevent conflicts during renumbering
   - ID counter now correctly syncs after renumbering operations
-- **Bug**: Collision resolution dependency handling (bd-437)
+- **Bug**: Collision resolution dependency handling
   - Uses unchecked dependency addition during collision remapping
   - Prevents spurious cycle detection errors
 - **Bug**: macOS crashes documented (closes #3, bd-87)
@@ -2364,13 +5211,13 @@ See README.md for hash ID format details and birthday paradox collision analysis
 - Faster command execution through RPC-backed daemon (up to 10x improvement)
 - N+1 query elimination in list/show operations
 - Reduced write amplification from improved auto-flush behavior
-- Cycle detection performance benchmarks added (bd-311)
+- Cycle detection performance benchmarks added
 
 ### Testing
 - Integration tests for daemon RPC request/response flows
 - End-to-end coverage for delete/restore lifecycles  
 - Regression tests for metadata handling, auto-flush, ID counter sync
-- Comprehensive tests for collision detection in auto-import (bd-401)
+- Comprehensive tests for collision detection in auto-import
 
 ### Documentation
 - Release process documentation added (RELEASING.md)
@@ -2404,7 +5251,7 @@ See README.md for hash ID format details and birthday paradox collision analysis
 - **MCP Reopen Support**: Reopen closed issues via MCP server
   - Claude Desktop plugin can now reopen issues
   - Useful for revisiting completed work
-- **Cross-Type Cycle Prevention**: Dependency cycles detected across all types (bd-312)
+- **Cross-Type Cycle Prevention**: Dependency cycles detected across all types
   - Prevents A→B→A cycles even when mixing `blocks`, `related`, etc.
   - Semantic validation for parent-child direction
   - Diagnostic warnings when cycles detected
@@ -2414,22 +5261,22 @@ See README.md for hash ID format details and birthday paradox collision analysis
   - Import would silently skip collisions instead of remapping
   - Could cause data loss when merging branches
   - Now correctly applies collision resolution with remapping
-- **Critical**: Transaction state corruption (bd-221)
+- **Critical**: Transaction state corruption
   - Nested transactions could corrupt database state
   - Fixed with proper transaction boundary handling
 - **Critical**: Concurrent temp file collisions (bd-306, bd-373)
   - Multiple `bd` processes would collide on shared `.tmp` filename
   - Now uses PID suffix for temp files: `.beads/issues.jsonl.tmp.12345`
-- **Critical**: Circular dependency detection gaps (bd-307)
+- **Critical**: Circular dependency detection gaps
   - Some cycle patterns were missed by detection algorithm
   - Enhanced with comprehensive cycle prevention
 - **Bug**: False positive merge conflict detection (bd-313, bd-270)
   - Auto-import would detect conflicts when none existed
   - Fixed with improved Git conflict marker detection
-- **Bug**: Import timeout with large issue sets (bd-199)
+- **Bug**: Import timeout with large issue sets
   - 200+ issue imports would timeout
   - Optimized import performance
-- **Bug**: Collision resolver missing ID counter sync (bd-331)
+- **Bug**: Collision resolver missing ID counter sync
   - After remapping, ID counters weren't updated
   - Could cause duplicate IDs in subsequent creates
 - **Bug**: NULL handling in statistics for empty databases (PR #37)
@@ -2444,7 +5291,7 @@ See README.md for hash ID format details and birthday paradox collision analysis
 - MCP integration tests fixed and linting cleaned up (PR #40)
 
 ### Performance
-- Cycle detection benchmarks added (bd-311)
+- Cycle detection benchmarks added
 - Import optimization for large issue sets
 - Export uses PID-based temp files to avoid lock contention
 
@@ -2493,7 +5340,7 @@ See README.md for hash ID format details and birthday paradox collision analysis
   - Fixed infinite recursion in complex dependency graphs
   - Prevents duplicate nodes at same level
   - Handles multiple blockers correctly
-- **Critical**: Hash-based auto-import replaces mtime comparison (bd-84)
+- **Critical**: Hash-based auto-import replaces mtime comparison
   - Git pull updates mtime but may not change content
   - Now uses SHA256 hash to detect actual changes
   - Prevents unnecessary imports after git operations
